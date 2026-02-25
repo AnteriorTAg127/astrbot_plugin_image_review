@@ -205,3 +205,8 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Local files that should not be uploaded
+开发指南（不上传）/
+图片审核相关技术实现（不上传）.md
+阿里云与腾讯云审核API实现文档（不上传）.md

@@ -1,0 +1,96 @@
+{
+    "image_censor_provider": {
+        "type": "string",
+        "description": "图片审核提供商",
+        "hint": "可选: Aliyun",
+        "default": "Aliyun",
+        "options": ["Aliyun"]
+    },
+    "enable_image_censor": {
+        "type": "bool",
+        "description": "是否启用图片审核",
+        "hint": "开启后将对图片进行内容审核",
+        "default": true
+    },
+    "aliyun": {
+        "type": "object",
+        "description": "阿里云内容安全配置",
+        "items": {
+            "key_id": {
+                "type": "string",
+                "description": "阿里云 AccessKey ID",
+                "hint": "从阿里云控制台获取"
+            },
+            "key_secret": {
+                "type": "string",
+                "description": "阿里云 AccessKey Secret",
+                "hint": "从阿里云控制台获取"
+            }
+        }
+    },
+    "group_settings": {
+        "type": "template_list",
+        "description": "群聊审核配置列表",
+        "hint": "配置需要启用图片审核的群聊及其管理群，每个群可以设置独立的违规处理和缓存配置",
+        "templates": {
+            "group_config": {
+                "name": "群聊配置",
+                "hint": "配置一个群聊及其对应的管理群",
+                "items": {
+                    "group_id": {
+                        "type": "string",
+                        "description": "群号",
+                        "hint": "需要审核的群聊QQ号"
+                    },
+                    "manage_group_id": {
+                        "type": "string",
+                        "description": "管理群号",
+                        "hint": "用于接收违规通知的管理群QQ号"
+                    },
+                    "enabled": {
+                        "type": "bool",
+                        "description": "是否启用",
+                        "hint": "是否对该群启用图片审核",
+                        "default": true
+                    },
+                    "first_mute_duration": {
+                        "type": "int",
+                        "description": "首次违规禁言时长(秒)",
+                        "hint": "首次违规时的禁言时间，默认600秒(10分钟)",
+                        "default": 600
+                    },
+                    "max_mute_duration": {
+                        "type": "int",
+                        "description": "最大禁言时长(秒)",
+                        "hint": "单次最长禁言时间，不得超过28天(2419200秒)",
+                        "default": 2419200
+                    },
+                    "mute_multiplier": {
+                        "type": "int",
+                        "description": "禁言时长翻倍倍数",
+                        "hint": "多次违规时禁言时长的翻倍倍数",
+                        "default": 2
+                    },
+                    "auto_recall": {
+                        "type": "bool",
+                        "description": "自动撤回违规图片",
+                        "hint": "检测到违规图片时是否自动撤回",
+                        "default": true
+                    },
+                    "base_expire_hours": {
+                        "type": "int",
+                        "description": "基础缓存过期时间(小时)",
+                        "hint": "黑白名单缓存的基础过期时间",
+                        "default": 2
+                    },
+                    "max_expire_days": {
+                        "type": "int",
+                        "description": "最大缓存周期(天)",
+                        "hint": "缓存过期时间的上限",
+                        "default": 14
+                    }
+                }
+            }
+        }
+    }
+}
