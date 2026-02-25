@@ -25,6 +25,18 @@
                 "type": "string",
                 "description": "阿里云 AccessKey Secret",
                 "hint": "从阿里云控制台获取"
+            },
+            "image_service": {
+                "type": "string",
+                "description": "图片审核服务类型",
+                "hint": "可选: baselineCheck, chat_detection_pro",
+                "default": "baselineCheck"
+            },
+            "image_info_type": {
+                "type": "string",
+                "description": "图片审核信息类型",
+                "hint": "可选: customImage, textInImage，多个用逗号分隔",
+                "default": "customImage,textInImage"
             }
         }
     },

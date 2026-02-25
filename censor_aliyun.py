@@ -6,11 +6,13 @@
 import asyncio
 import base64
 import json
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Set, Tuple
 
 import aiohttp
 
-from .censor_base import CensorBase, CensorError, RiskLevel
+from .censor_base import CensorBase, CensorError
+from .database import RiskLevel
 
 
 class AliyunCensor(CensorBase):
@@ -28,8 +30,11 @@ class AliyunCensor(CensorBase):
         self._key_secret = config["key_secret"]
         self._endpoint = "green-cip.cn-shanghai.aliyuncs.com"
         self._region_id = "cn-shanghai"
+        self._image_service = config.get("image_service", "baselineCheck")
+        self._image_info_type = config.get("image_info_type", "customImage,textInImage")
         self._session = None
         self._semaphore = asyncio.Semaphore(80)
+        self._executor = ThreadPoolExecutor(max_workers=20, thread_name_prefix="aliyun_censor")
 
     async def initialize(self):
         """初始化异步资源"""
@@ -37,10 +42,14 @@ class AliyunCensor(CensorBase):
             self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
 
     async def close(self):
-        """关闭HTTP会话"""
+        """关闭HTTP会话和线程池"""
         if self._session:
             await self._session.close()
             self._session = None
+        # 关闭线程池
+        if self._executor:
+            self._executor.shutdown(wait=False)
+            self._executor = None
 
     async def detect_text(self, text: str) -> Tuple[RiskLevel, Set[str]]:
         """
@@ -107,7 +116,7 @@ class AliyunCensor(CensorBase):
 
             async with self._semaphore:
                 response = await asyncio.get_event_loop().run_in_executor(
-                    None,
+                    self._executor,
                     lambda: client.text_moderation_with_options(request, runtime)
                 )
 
@@ -175,16 +184,16 @@ class AliyunCensor(CensorBase):
 
             service_params = {
                 "imageUrl": image,
-                "infoType": "customImage,textInImage"
+                "infoType": self._image_info_type
             }
             request = models.ImageModerationRequest(
-                service="baselineCheck",
+                service=self._image_service,
                 service_parameters=json.dumps(service_params)
             )
 
             async with self._semaphore:
                 response = await asyncio.get_event_loop().run_in_executor(
-                    None,
+                    self._executor,
                     lambda: client.image_moderation_with_options(request, runtime)
                 )
 
