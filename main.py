@@ -54,7 +54,7 @@ def _sanitize_filename(filename: str) -> str:
     "image_review",
     "AstrBot",
     "图片审核插件，提供图片内容审核、违规处理、管理群通知等功能",
-    "1.0.0",
+    "1.0.1",
 )
 class ImageReviewPlugin(Star):
     """图片审核插件主类"""
@@ -312,6 +312,50 @@ class ImageReviewPlugin(Star):
                 return True
         return False
 
+    async def _is_user_admin(
+        self, event: AstrMessageEvent, group_id: str, user_id: str
+    ) -> bool:
+        """
+        检查用户是否为管理员或群主
+
+        Args:
+            event: 消息事件
+            group_id: 群ID
+            user_id: 用户ID
+
+        Returns:
+            是否为管理员或群主
+        """
+        try:
+            platform_name = event.get_platform_name()
+            if platform_name == "aiocqhttp":
+                from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
+                    AiocqhttpMessageEvent,
+                )
+
+                if isinstance(event, AiocqhttpMessageEvent):
+                    client = event.bot
+                    # 获取群成员信息
+                    member_info = await client.api.call_action(
+                        "get_group_member_info",
+                        group_id=int(group_id),
+                        user_id=int(user_id),
+                        no_cache=True,
+                    )
+                    if member_info:
+                        role = member_info.get("role", "member")
+                        # owner=群主, admin=管理员
+                        is_admin = role in ("owner", "admin")
+                        logger.debug(
+                            f"用户 {user_id} 在群 {group_id} 的身份: {role}, 是否管理员: {is_admin}"
+                        )
+                        return is_admin
+            logger.debug(f"平台 {platform_name} 暂不支持检查用户身份")
+            return False
+        except Exception as e:
+            logger.debug(f"检查用户身份失败: {e}")
+            return False
+
     async def _handle_violation(
         self,
         event: AstrMessageEvent,
@@ -346,6 +390,27 @@ class ImageReviewPlugin(Star):
             group_config = self._get_group_config(group_id)
             if not group_config:
                 logger.debug(f"群 {group_id} 未配置，跳过处理")
+                return
+
+            # 检查用户是否为管理员或群主
+            is_admin = await self._is_user_admin(event, group_id, user_id)
+            if is_admin:
+                logger.info(f"用户 {user_id} 是管理员/群主，仅通知管理群，不执行处罚")
+                # 对管理员只通知，不记录违规、不禁言、不撤回
+                await self._notify_manage_group(
+                    event,
+                    group_id,
+                    user_id,
+                    user_name,
+                    md5_hash,
+                    image_url,
+                    risk_level,
+                    risk_reason,
+                    0,  # 禁言时长为0
+                    0,  # 违规次数为0
+                    is_admin=True,  # 标记为管理员
+                )
+                logger.info(f"管理员违规通知已发送: 用户={user_id}, 群={group_id}")
                 return
 
             # 1. 自动撤回违规图片
@@ -542,6 +607,7 @@ class ImageReviewPlugin(Star):
         risk_reason: str,
         mute_duration: int,
         violation_count: int,
+        is_admin: bool = False,
     ):
         """
         通知管理群
@@ -557,6 +623,7 @@ class ImageReviewPlugin(Star):
             risk_reason: 风险原因
             mute_duration: 禁言时长
             violation_count: 违规次数
+            is_admin: 是否为管理员/群主
         """
         try:
             logger.debug(
@@ -574,28 +641,33 @@ class ImageReviewPlugin(Star):
             )
 
             # 格式化处理措施
-            if mute_duration < 60:
-                mute_str = f"{mute_duration}秒"
-            elif mute_duration < 3600:
-                mute_str = f"{mute_duration // 60}分钟"
-            elif mute_duration < 86400:
-                mute_str = f"{mute_duration // 3600}小时"
+            if is_admin:
+                action_str = "无（管理员/群主身份，不执行处罚）"
             else:
-                mute_str = f"{mute_duration // 86400}天"
-            logger.debug(f"处理措施: 禁言{mute_str}")
+                if mute_duration < 60:
+                    mute_str = f"{mute_duration}秒"
+                elif mute_duration < 3600:
+                    mute_str = f"{mute_duration // 60}分钟"
+                elif mute_duration < 86400:
+                    mute_str = f"{mute_duration // 3600}小时"
+                else:
+                    mute_str = f"{mute_duration // 86400}天"
+                action_str = f"撤回图片+禁言{mute_str}"
+            logger.debug(f"处理措施: {action_str}")
 
             # 构建违规信息（新格式）
             evidence_path_str = (
                 f"\n证据图片已保存: {evidence_path}" if evidence_path else ""
             )
+            admin_tag = " [管理员/群主]" if is_admin else ""
             violation_info = (
                 f"⚠️ 违规图片检测通知\n"
                 f"━━━━━━━━━━━━━━━\n"
-                f"1️⃣ 昵称: {user_name}\n"
+                f"1️⃣ 昵称: {user_name}{admin_tag}\n"
                 f"2️⃣ QQ号: {user_id}\n"
                 f"3️⃣ 违规次数: 第{violation_count}次\n"
                 f"4️⃣ 本次违规时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                f"5️⃣ 处理措施: 撤回图片+禁言{mute_str}\n"
+                f"5️⃣ 处理措施: {action_str}\n"
                 f"━━━━━━━━━━━━━━━\n"
                 f"风险等级: {risk_level.name}\n"
                 f"风险原因: {risk_reason}{evidence_path_str}"
@@ -1580,3 +1652,63 @@ class ImageReviewPlugin(Star):
         except Exception as e:
             logger.error(f"移除自动黑名单异常: {e}")
             yield event.plain_result(f"❌ 操作失败: {str(e)}")
+
+    @filter.command("审查帮助")
+    async def review_help(self, event: AstrMessageEvent):
+        """显示图片审核插件帮助信息"""
+        try:
+            group_id = str(event.get_group_id()) if event.get_group_id() else None
+            if not group_id:
+                return
+
+            # 检查是否是管理群或被审核的群
+            is_manage = self._is_manage_group(group_id)
+            is_enabled = self._is_group_enabled(group_id)
+
+            if not is_manage and not is_enabled:
+                return
+
+            help_text = (
+                "📖 图片审核插件使用帮助\n"
+                "━━━━━━━━━━━━━━━\n"
+                "\n"
+                "【管理员命令】\n"
+                "━━━━━━━━━━━━━━━\n"
+                "/查询违规 [QQ号] - 查询用户违规记录\n"
+                "/删除违规 [QQ号] - 删除用户违规记录\n"
+                "/审核状态 - 查看插件运行状态\n"
+                "/清除缓存 - 清除自动黑白名单缓存\n"
+                "/查询名单 - 查询图片名单状态(需引用图片)\n"
+                "\n"
+                "【人工白名单管理】\n"
+                "━━━━━━━━━━━━━━━\n"
+                "/添加白名单 [原因] - 添加图片到白名单(需引用)\n"
+                "/移除白名单 - 从白名单移除图片(需引用)\n"
+                "/清空白名单 确认 - 清空所有人工白名单\n"
+                "\n"
+                "【人工黑名单管理】\n"
+                "━━━━━━━━━━━━━━━\n"
+                "/添加黑名单 [REVIEW/BLOCK] [原因]\n"
+                "  添加图片到黑名单(需引用图片)\n"
+                "/移除黑名单 - 从黑名单移除图片(需引用)\n"
+                "/清空黑名单 确认 - 清空所有人工黑名单\n"
+                "\n"
+                "【自动名单管理】\n"
+                "━━━━━━━━━━━━━━━\n"
+                "/移除自动白名单 - 移除自动白名单(需引用)\n"
+                "/移除自动黑名单 - 移除自动黑名单(需引用)\n"
+                "\n"
+                "【说明】\n"
+                "━━━━━━━━━━━━━━━\n"
+                "• 带(需引用)的命令需要引用图片消息\n"
+                "• REVIEW=建议复审, BLOCK=违规拦截\n"
+                "• 管理员/群主违规仅通知，不执行处罚\n"
+                "• 机器人需为群主才能处理管理员\n"
+                "━━━━━━━━━━━━━━━"
+            )
+
+            yield event.plain_result(help_text)
+
+        except Exception as e:
+            logger.error(f"显示帮助异常: {e}")
+            yield event.plain_result("❌ 获取帮助信息失败")
