@@ -148,6 +148,21 @@ class ImageReviewPlugin(Star):
         config = self._group_config.get(group_id)
         return config["manage_group_id"] if config else None
 
+    def _get_group_id_by_manage_group(self, manage_group_id: str) -> Optional[str]:
+        """
+        根据管理群ID反向查找主群ID
+
+        Args:
+            manage_group_id: 管理群ID
+
+        Returns:
+            主群ID，未找到则返回None
+        """
+        for group_id, config in self._group_config.items():
+            if config.get("manage_group_id") == manage_group_id:
+                return group_id
+        return None
+
     def _extract_image_md5(self, event: AstrMessageEvent, image_comp: Comp.Image) -> Optional[str]:
         """
         从消息事件中提取图片的MD5值
@@ -751,3 +766,32 @@ class ImageReviewPlugin(Star):
 
         except Exception as e:
             logger.error(f"清除缓存异常: {e}")
+
+    @filter.command("删除违规")
+    async def delete_violation(self, event: AstrMessageEvent, user_id_str: str = ""):
+        """删除指定用户的违规记录（管理群专用）"""
+        try:
+            manage_group_id = str(event.get_group_id()) if event.get_group_id() else None
+            if not manage_group_id:
+                return
+
+            if not self._is_manage_group(manage_group_id):
+                return
+
+            if not user_id_str:
+                yield event.plain_result("使用方法: /删除违规 [QQ号]")
+                return
+
+            user_id = user_id_str.strip()
+
+            target_group_id = self._get_group_id_by_manage_group(manage_group_id)
+            if not target_group_id:
+                yield event.plain_result("❌ 未找到对应的被管理群")
+                return
+
+            deleted_count = await self._db.delete_user_violations(user_id, target_group_id)
+
+            yield event.plain_result(f"✅ 已删除用户 {user_id} 在群 {target_group_id} 的违规记录，共 {deleted_count} 条")
+
+        except Exception as e:
+            logger.error(f"删除违规记录异常: {e}")

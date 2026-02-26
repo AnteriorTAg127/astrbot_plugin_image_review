@@ -490,6 +490,48 @@ class DatabaseManager:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
+    async def delete_user_violations(
+        self,
+        user_id: str,
+        group_id: Optional[str] = None
+    ) -> int:
+        """
+        删除用户违规记录
+
+        Args:
+            user_id: 用户ID
+            group_id: 群ID（可选，不指定则删除所有群的记录）
+
+        Returns:
+            删除的记录数量
+        """
+        await self._init_db()
+        
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+
+            if group_id:
+                await cursor.execute(
+                    "DELETE FROM violation_records WHERE user_id = ? AND group_id = ?",
+                    (user_id, group_id)
+                )
+                await cursor.execute(
+                    "DELETE FROM user_violation_stats WHERE user_id = ? AND group_id = ?",
+                    (user_id, group_id)
+                )
+            else:
+                await cursor.execute(
+                    "DELETE FROM violation_records WHERE user_id = ?",
+                    (user_id,)
+                )
+                await cursor.execute(
+                    "DELETE FROM user_violation_stats WHERE user_id = ?",
+                    (user_id,)
+                )
+            
+            await conn.commit()
+            return cursor.rowcount
+
     async def cache_message(
         self,
         group_id: str,
@@ -601,72 +643,4 @@ class DatabaseManager:
             return {
                 "whitelist": whitelist_count,
                 "blacklist": blacklist_count
-            }
-
-    async def delete_user_violation_records(
-        self,
-        user_id: str,
-        group_id: Optional[str] = None
-    ) -> dict:
-        """
-        删除用户违规记录
-
-        Args:
-            user_id: 用户ID
-            group_id: 群ID（可选，不指定则删除所有群的记录）
-
-        Returns:
-            包含删除数量的字典
-        """
-        import logging
-        logger = logging.getLogger(__name__)
-        await self._init_db()
-        
-        async with aiosqlite.connect(self._db_path) as conn:
-            cursor = await conn.cursor()
-            
-            if group_id:
-                await cursor.execute(
-                    "SELECT id, md5_hash FROM violation_records WHERE user_id = ? AND group_id = ?",
-                    (user_id, group_id)
-                )
-            else:
-                await cursor.execute(
-                    "SELECT id, md5_hash FROM violation_records WHERE user_id = ?",
-                    (user_id,)
-                )
-            
-            records = await cursor.fetchall()
-            md5_hashes = [row[1] for row in records if row[1]]
-            
-            if group_id:
-                await cursor.execute(
-                    "DELETE FROM violation_records WHERE user_id = ? AND group_id = ?",
-                    (user_id, group_id)
-                )
-                deleted_count = cursor.rowcount
-                
-                await cursor.execute(
-                    "DELETE FROM user_violation_stats WHERE user_id = ? AND group_id = ?",
-                    (user_id, group_id)
-                )
-            else:
-                await cursor.execute(
-                    "DELETE FROM violation_records WHERE user_id = ?",
-                    (user_id,)
-                )
-                deleted_count = cursor.rowcount
-                
-                await cursor.execute(
-                    "DELETE FROM user_violation_stats WHERE user_id = ?",
-                    (user_id,)
-                )
-            
-            await conn.commit()
-            
-            logger.info(f"删除用户 {user_id} 的违规记录 {deleted_count} 条")
-            
-            return {
-                "deleted_count": deleted_count,
-                "md5_hashes": md5_hashes
             }
