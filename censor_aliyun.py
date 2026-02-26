@@ -37,21 +37,25 @@ class AliyunCensor(CensorBase):
         self._image_info_type = config.get("image_info_type", "customImage,textInImage")
         self._session = None
         self._semaphore = asyncio.Semaphore(80)
-        self._executor = ThreadPoolExecutor(max_workers=20, thread_name_prefix="aliyun_censor")
+        self._executor = ThreadPoolExecutor(
+            max_workers=20, thread_name_prefix="aliyun_censor"
+        )
 
     async def initialize(self):
         """初始化异步资源"""
         if self._session is None:
-            self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
+            self._session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=15)
+            )
 
     async def close(self):
         """关闭HTTP会话和线程池"""
         if self._session:
             await self._session.close()
             self._session = None
-        # 关闭线程池 - 使用 wait=True 确保任务完成，但设置超时避免无限等待
+        # 关闭线程池 - 使用 wait=False 避免阻塞事件循环
         if self._executor:
-            self._executor.shutdown(wait=True)
+            self._executor.shutdown(wait=False)
             self._executor = None
 
     async def detect_text(self, text: str) -> tuple[RiskLevel, set[str]]:
@@ -101,7 +105,7 @@ class AliyunCensor(CensorBase):
                 access_key_id=self._key_id,
                 access_key_secret=self._key_secret,
                 endpoint=self._endpoint,
-                region_id=self._region_id
+                region_id=self._region_id,
             )
             client = Client(config)
             runtime = util_models.RuntimeOptions()
@@ -109,17 +113,19 @@ class AliyunCensor(CensorBase):
             service_params = {"content": content}
             request = models.TextModerationRequest(
                 service="chat_detection_pro",
-                service_parameters=json.dumps(service_params)
+                service_parameters=json.dumps(service_params),
             )
 
             async with self._semaphore:
                 response = await asyncio.get_event_loop().run_in_executor(
                     self._executor,
-                    lambda: client.text_moderation_with_options(request, runtime)
+                    lambda: client.text_moderation_with_options(request, runtime),
                 )
 
                 if response.status_code != 200:
-                    raise CensorError(f"阿里云文本审核请求失败: HTTP {response.status_code}")
+                    raise CensorError(
+                        f"阿里云文本审核请求失败: HTTP {response.status_code}"
+                    )
 
                 body = response.body
                 if body.code != 200:
@@ -132,7 +138,9 @@ class AliyunCensor(CensorBase):
                 if data.result:
                     for r_data in data.result:
                         if hasattr(r_data, "risk_words") and r_data.risk_words:
-                            risk_words_list = [word.strip() for word in r_data.risk_words.split(",")]
+                            risk_words_list = [
+                                word.strip() for word in r_data.risk_words.split(",")
+                            ]
                             risk_words_set.update(risk_words_list)
 
                 if risk_level in ("none", "low"):
@@ -170,28 +178,27 @@ class AliyunCensor(CensorBase):
                 access_key_id=self._key_id,
                 access_key_secret=self._key_secret,
                 endpoint=self._endpoint,
-                region_id=self._region_id
+                region_id=self._region_id,
             )
             client = Client(config)
             runtime = util_models.RuntimeOptions()
 
-            service_params = {
-                "imageUrl": image,
-                "infoType": self._image_info_type
-            }
+            service_params = {"imageUrl": image, "infoType": self._image_info_type}
             request = models.ImageModerationRequest(
                 service=self._image_service,
-                service_parameters=json.dumps(service_params)
+                service_parameters=json.dumps(service_params),
             )
 
             async with self._semaphore:
                 response = await asyncio.get_event_loop().run_in_executor(
                     self._executor,
-                    lambda: client.image_moderation_with_options(request, runtime)
+                    lambda: client.image_moderation_with_options(request, runtime),
                 )
 
                 if response.status_code != 200:
-                    raise CensorError(f"阿里云图片审核请求失败: HTTP {response.status_code}")
+                    raise CensorError(
+                        f"阿里云图片审核请求失败: HTTP {response.status_code}"
+                    )
 
                 body = response.body
                 if body.code != 200:

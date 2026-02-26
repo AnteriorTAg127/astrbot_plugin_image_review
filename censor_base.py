@@ -10,6 +10,7 @@ from typing import Any
 
 class RiskLevel(Enum):
     """风险等级枚举"""
+
     Pass = 0
     Review = 1
     Block = 2
@@ -77,7 +78,7 @@ class CensorBase(ABC):
 
         chunks = []
         for i in range(0, len(text), max_length):
-            chunks.append(text[i:i + max_length])
+            chunks.append(text[i : i + max_length])
         return chunks
 
     async def __aenter__(self):
@@ -91,6 +92,7 @@ class CensorBase(ABC):
         except Exception as e:
             # 记录异常但不掩盖原始异常
             import logging
+
             logging.getLogger(__name__).error(f"关闭审核器资源时发生异常: {e}")
 
     @abstractmethod

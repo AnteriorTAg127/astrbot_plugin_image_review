@@ -67,7 +67,9 @@ class VLAICensor(CensorBase):
         with Image.open(io.BytesIO(image_data)) as img:
             original_width, original_height = img.size
             original_mode = img.mode
-            logger.debug(f"图片原始信息: 尺寸={original_width}x{original_height}, 模式={original_mode}")
+            logger.debug(
+                f"图片原始信息: 尺寸={original_width}x{original_height}, 模式={original_mode}"
+            )
 
             width, height = original_width, original_height
 
@@ -107,14 +109,20 @@ class VLAICensor(CensorBase):
                     background = Image.new("RGB", img.size, (255, 255, 255))
                     background.paste(img, mask=img.split()[3])
                     img = background
-                    logger.debug(f"Palette模式(透明)图片已转换为 RGB 模式，格式: {img_format}")
+                    logger.debug(
+                        f"Palette模式(透明)图片已转换为 RGB 模式，格式: {img_format}"
+                    )
                 else:
                     img = img.convert("RGB")
-                    logger.debug(f"Palette模式图片已转换为 RGB 模式，格式: {img_format}")
+                    logger.debug(
+                        f"Palette模式图片已转换为 RGB 模式，格式: {img_format}"
+                    )
             elif img.mode != "RGB":
                 img = img.convert("RGB")
                 img_format = "JPEG"
-                logger.debug(f"非RGB模式({original_mode})图片已转换为 RGB 模式，格式: {img_format}")
+                logger.debug(
+                    f"非RGB模式({original_mode})图片已转换为 RGB 模式，格式: {img_format}"
+                )
             else:
                 img_format = "JPEG"
                 logger.debug(f"图片模式为 RGB，格式: {img_format}")
@@ -125,7 +133,9 @@ class VLAICensor(CensorBase):
             base64_data = base64.b64encode(buffer.getvalue()).decode("utf-8")
             mime_type = f"data:image/{img_format.lower()};base64"
 
-            logger.debug(f"图片处理完成: 最终尺寸={width}x{height}, 格式={img_format}, base64长度={len(base64_data)}")
+            logger.debug(
+                f"图片处理完成: 最终尺寸={width}x{height}, 格式={img_format}, base64长度={len(base64_data)}"
+            )
 
             return base64_data, mime_type
 
@@ -152,7 +162,9 @@ class VLAICensor(CensorBase):
         Returns:
             (风险等级, 风险描述集合)
         """
-        logger.debug(f"开始 VLAI 图片审核，输入类型: {'URL' if image.startswith('http') else 'base64' if image.startswith('base64://') else '未知'}")
+        logger.debug(
+            f"开始 VLAI 图片审核，输入类型: {'URL' if image.startswith('http') else 'base64' if image.startswith('base64://') else '未知'}"
+        )
 
         try:
             # 获取图片数据
@@ -164,7 +176,9 @@ class VLAICensor(CensorBase):
                 image_data = await download_image(image)
                 logger.debug(f"图片下载完成，大小: {len(image_data)} bytes")
                 # 使用线程池执行同步的图片处理操作，避免阻塞事件循环
-                base64_data, mime_type = await asyncio.to_thread(self._resize_image_if_needed, image_data)
+                base64_data, mime_type = await asyncio.to_thread(
+                    self._resize_image_if_needed, image_data
+                )
             elif image.startswith("base64://"):
                 logger.debug("处理 base64 图片")
                 # 处理 base64 图片
@@ -172,7 +186,9 @@ class VLAICensor(CensorBase):
                 image_data = base64.b64decode(base64_str)
                 logger.debug(f"base64 解码完成，大小: {len(image_data)} bytes")
                 # 使用线程池执行同步的图片处理操作，避免阻塞事件循环
-                base64_data, mime_type = await asyncio.to_thread(self._resize_image_if_needed, image_data)
+                base64_data, mime_type = await asyncio.to_thread(
+                    self._resize_image_if_needed, image_data
+                )
             else:
                 raise CensorError(f"不支持的图片格式: {image[:50]}...")
 
@@ -184,7 +200,9 @@ class VLAICensor(CensorBase):
                     TextPart(text=self._censor_prompt),
                 ]
             )
-            logger.debug(f"多模态消息构建完成，使用提供商: {self._provider_id if self._provider_id else '默认'}")
+            logger.debug(
+                f"多模态消息构建完成，使用提供商: {self._provider_id if self._provider_id else '默认'}"
+            )
 
             # 调用 AstrBot AI 接口，设置30秒超时
             provider_id = self._provider_id if self._provider_id else None
@@ -194,7 +212,7 @@ class VLAICensor(CensorBase):
                     chat_provider_id=provider_id,
                     contexts=[user_msg],
                 ),
-                timeout=30.0
+                timeout=30.0,
             )
             logger.debug("LLM 调用完成")
 
@@ -258,7 +276,17 @@ class VLAICensor(CensorBase):
         content_lower = content.lower()
 
         # 明确的违规关键词
-        nsfw_keywords = ["违规", "porn", "nsfw", "adult", "sexual", "nude", "暴力", "血腥", "恐怖"]
+        nsfw_keywords = [
+            "违规",
+            "porn",
+            "nsfw",
+            "adult",
+            "sexual",
+            "nude",
+            "暴力",
+            "血腥",
+            "恐怖",
+        ]
         # 明确的正常关键词
         safe_keywords = ["正常", "safe", "appropriate", "clean", "无违规"]
 
@@ -273,8 +301,12 @@ class VLAICensor(CensorBase):
         elif has_nsfw and has_safe:
             # 同时包含两者，根据上下文判断
             # 如果"正常"在"违规"之前出现，可能表示"看起来正常但..."
-            nsfw_pos = min(content_lower.find(kw) for kw in nsfw_keywords if kw in content_lower)
-            safe_pos = min(content_lower.find(kw) for kw in safe_keywords if kw in content_lower)
+            nsfw_pos = min(
+                content_lower.find(kw) for kw in nsfw_keywords if kw in content_lower
+            )
+            safe_pos = min(
+                content_lower.find(kw) for kw in safe_keywords if kw in content_lower
+            )
 
             if nsfw_pos < safe_pos:
                 return RiskLevel.Block, content

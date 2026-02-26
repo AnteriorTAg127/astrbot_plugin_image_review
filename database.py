@@ -13,6 +13,7 @@ import aiosqlite
 
 class RiskLevel(Enum):
     """风险等级枚举"""
+
     Pass = 0
     Review = 1
     Block = 2
@@ -35,6 +36,7 @@ class DatabaseManager:
     async def _init_db(self):
         """初始化数据库表结构"""
         import logging
+
         logger = logging.getLogger(__name__)
         if self._initialized:
             logger.debug("数据库已初始化，跳过")
@@ -193,6 +195,7 @@ class DatabaseManager:
             是否在白名单中
         """
         import logging
+
         logger = logging.getLogger(__name__)
         logger.debug(f"检查白名单，MD5: {md5_hash}")
         await self._init_db()
@@ -201,7 +204,7 @@ class DatabaseManager:
             cursor = await conn.cursor()
             await cursor.execute(
                 "SELECT id, expires_at, hit_count FROM whitelist WHERE md5_hash = ?",
-                (md5_hash,)
+                (md5_hash,),
             )
             result = await cursor.fetchone()
 
@@ -210,7 +213,9 @@ class DatabaseManager:
                 return False
 
             record_id, expires_at, hit_count = result
-            logger.debug(f"白名单中找到记录，ID: {record_id}, 过期时间: {expires_at}, 命中次数: {hit_count}")
+            logger.debug(
+                f"白名单中找到记录，ID: {record_id}, 过期时间: {expires_at}, 命中次数: {hit_count}"
+            )
 
             # 检查是否过期
             if expires_at and datetime.now() > datetime.fromisoformat(expires_at):
@@ -222,10 +227,12 @@ class DatabaseManager:
 
             # 更新命中次数
             new_hit_count = hit_count + 1
-            logger.debug(f"更新白名单命中次数，ID: {record_id}, 旧次数: {hit_count}, 新次数: {new_hit_count}")
+            logger.debug(
+                f"更新白名单命中次数，ID: {record_id}, 旧次数: {hit_count}, 新次数: {new_hit_count}"
+            )
             await cursor.execute(
                 "UPDATE whitelist SET hit_count = ? WHERE id = ?",
-                (new_hit_count, record_id)
+                (new_hit_count, record_id),
             )
             await conn.commit()
             logger.debug(f"白名单检查通过，MD5: {md5_hash}")
@@ -242,6 +249,7 @@ class DatabaseManager:
             如果存在返回(risk_level, risk_reason)，否则返回None
         """
         import logging
+
         logger = logging.getLogger(__name__)
         logger.debug(f"检查黑名单，MD5: {md5_hash}")
         await self._init_db()
@@ -251,7 +259,7 @@ class DatabaseManager:
             await cursor.execute(
                 """SELECT id, risk_level, risk_reason, expires_at, hit_count
                    FROM blacklist WHERE md5_hash = ?""",
-                (md5_hash,)
+                (md5_hash,),
             )
             result = await cursor.fetchone()
 
@@ -260,7 +268,9 @@ class DatabaseManager:
                 return None
 
             record_id, risk_level, risk_reason, expires_at, hit_count = result
-            logger.debug(f"黑名单中找到记录，ID: {record_id}, 风险等级: {risk_level}, 原因: {risk_reason}, 过期时间: {expires_at}, 命中次数: {hit_count}")
+            logger.debug(
+                f"黑名单中找到记录，ID: {record_id}, 风险等级: {risk_level}, 原因: {risk_reason}, 过期时间: {expires_at}, 命中次数: {hit_count}"
+            )
 
             # 检查是否过期
             if expires_at and datetime.now() > datetime.fromisoformat(expires_at):
@@ -272,22 +282,23 @@ class DatabaseManager:
 
             # 更新命中次数
             new_hit_count = hit_count + 1
-            logger.debug(f"更新黑名单命中次数，ID: {record_id}, 旧次数: {hit_count}, 新次数: {new_hit_count}")
+            logger.debug(
+                f"更新黑名单命中次数，ID: {record_id}, 旧次数: {hit_count}, 新次数: {new_hit_count}"
+            )
             await cursor.execute(
                 "UPDATE blacklist SET hit_count = ? WHERE id = ?",
-                (new_hit_count, record_id)
+                (new_hit_count, record_id),
             )
             await conn.commit()
 
             risk_level_enum = RiskLevel(risk_level)
-            logger.debug(f"黑名单检查命中，风险等级: {risk_level_enum.name}, 原因: {risk_reason or ''}")
+            logger.debug(
+                f"黑名单检查命中，风险等级: {risk_level_enum.name}, 原因: {risk_reason or ''}"
+            )
             return risk_level_enum, risk_reason or ""
 
     async def add_to_whitelist(
-        self,
-        md5_hash: str,
-        base_expire_hours: int = 2,
-        max_expire_days: int = 14
+        self, md5_hash: str, base_expire_hours: int = 2, max_expire_days: int = 14
     ):
         """
         添加到白名单
@@ -298,6 +309,7 @@ class DatabaseManager:
             max_expire_days: 最大过期时间（天）
         """
         import logging
+
         logger = logging.getLogger(__name__)
         logger.debug(f"添加到白名单，MD5: {md5_hash}")
         await self._init_db()
@@ -307,8 +319,7 @@ class DatabaseManager:
 
             # 检查是否已存在
             await cursor.execute(
-                "SELECT hit_count FROM whitelist WHERE md5_hash = ?",
-                (md5_hash,)
+                "SELECT hit_count FROM whitelist WHERE md5_hash = ?", (md5_hash,)
             )
             result = await cursor.fetchone()
 
@@ -318,8 +329,10 @@ class DatabaseManager:
                 logger.debug(f"白名单中已存在，命中次数: {hit_count}")
                 # 每次命中增加50%过期时间，避免指数增长
                 expire_hours = min(
-                    int(base_expire_hours * (1.5 ** min(hit_count, 10))),  # 限制最大10次翻倍
-                    max_expire_days * 24
+                    int(
+                        base_expire_hours * (1.5 ** min(hit_count, 10))
+                    ),  # 限制最大10次翻倍
+                    max_expire_days * 24,
                 )
                 logger.debug(f"延长过期时间: {expire_hours}小时")
             else:
@@ -332,7 +345,7 @@ class DatabaseManager:
             await cursor.execute(
                 """INSERT OR REPLACE INTO whitelist (md5_hash, expires_at, hit_count)
                    VALUES (?, ?, COALESCE((SELECT hit_count FROM whitelist WHERE md5_hash = ?), 0))""",
-                (md5_hash, expires_at.isoformat(), md5_hash)
+                (md5_hash, expires_at.isoformat(), md5_hash),
             )
             await conn.commit()
             logger.debug(f"添加到白名单完成，MD5: {md5_hash}")
@@ -343,7 +356,7 @@ class DatabaseManager:
         risk_level: RiskLevel,
         risk_reason: str,
         base_expire_hours: int = 2,
-        max_expire_days: int = 14
+        max_expire_days: int = 14,
     ):
         """
         添加到黑名单
@@ -356,8 +369,11 @@ class DatabaseManager:
             max_expire_days: 最大过期时间（天）
         """
         import logging
+
         logger = logging.getLogger(__name__)
-        logger.debug(f"添加到黑名单，MD5: {md5_hash}, 风险等级: {risk_level.name}, 原因: {risk_reason}")
+        logger.debug(
+            f"添加到黑名单，MD5: {md5_hash}, 风险等级: {risk_level.name}, 原因: {risk_reason}"
+        )
         await self._init_db()
 
         async with aiosqlite.connect(self._db_path) as conn:
@@ -365,8 +381,7 @@ class DatabaseManager:
 
             # 检查是否已存在
             await cursor.execute(
-                "SELECT hit_count FROM blacklist WHERE md5_hash = ?",
-                (md5_hash,)
+                "SELECT hit_count FROM blacklist WHERE md5_hash = ?", (md5_hash,)
             )
             result = await cursor.fetchone()
 
@@ -376,8 +391,10 @@ class DatabaseManager:
                 logger.debug(f"黑名单中已存在，命中次数: {hit_count}")
                 # 每次命中增加50%过期时间，避免指数增长
                 expire_hours = min(
-                    int(base_expire_hours * (1.5 ** min(hit_count, 10))),  # 限制最大10次翻倍
-                    max_expire_days * 24
+                    int(
+                        base_expire_hours * (1.5 ** min(hit_count, 10))
+                    ),  # 限制最大10次翻倍
+                    max_expire_days * 24,
                 )
                 logger.debug(f"延长过期时间: {expire_hours}小时")
             else:
@@ -391,7 +408,13 @@ class DatabaseManager:
                 """INSERT OR REPLACE INTO blacklist
                    (md5_hash, risk_level, risk_reason, expires_at, hit_count)
                    VALUES (?, ?, ?, ?, COALESCE((SELECT hit_count FROM blacklist WHERE md5_hash = ?), 0))""",
-                (md5_hash, risk_level.value, risk_reason, expires_at.isoformat(), md5_hash)
+                (
+                    md5_hash,
+                    risk_level.value,
+                    risk_reason,
+                    expires_at.isoformat(),
+                    md5_hash,
+                ),
             )
             await conn.commit()
             logger.debug(f"添加到黑名单完成，MD5: {md5_hash}")
@@ -405,7 +428,7 @@ class DatabaseManager:
         risk_level: RiskLevel,
         risk_reason: str,
         mute_duration: int | None = None,
-        message_id: str | None = None
+        message_id: str | None = None,
     ):
         """
         记录违规信息
@@ -421,8 +444,11 @@ class DatabaseManager:
             message_id: 消息ID
         """
         import logging
+
         logger = logging.getLogger(__name__)
-        logger.debug(f"记录违规信息，用户: {user_id}, 群: {group_id}, 风险等级: {risk_level.name}")
+        logger.debug(
+            f"记录违规信息，用户: {user_id}, 群: {group_id}, 风险等级: {risk_level.name}"
+        )
         await self._init_db()
 
         async with aiosqlite.connect(self._db_path) as conn:
@@ -434,7 +460,16 @@ class DatabaseManager:
                 """INSERT INTO violation_records
                    (user_id, group_id, md5_hash, image_url, risk_level, risk_reason, mute_duration, message_id)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (user_id, group_id, md5_hash, image_url, risk_level.value, risk_reason, mute_duration, message_id)
+                (
+                    user_id,
+                    group_id,
+                    md5_hash,
+                    image_url,
+                    risk_level.value,
+                    risk_reason,
+                    mute_duration,
+                    message_id,
+                ),
             )
             logger.debug("违规记录插入完成")
 
@@ -447,7 +482,7 @@ class DatabaseManager:
                    violation_count = violation_count + 1,
                    last_violation_time = CURRENT_TIMESTAMP,
                    total_mute_duration = total_mute_duration + ?""",
-                (user_id, group_id, mute_duration or 0, mute_duration or 0)
+                (user_id, group_id, mute_duration or 0, mute_duration or 0),
             )
             logger.debug("用户违规统计更新完成")
 
@@ -471,16 +506,13 @@ class DatabaseManager:
             cursor = await conn.cursor()
             await cursor.execute(
                 "SELECT violation_count FROM user_violation_stats WHERE user_id = ? AND group_id = ?",
-                (user_id, group_id)
+                (user_id, group_id),
             )
             result = await cursor.fetchone()
             return result[0] if result else 0
 
     async def get_user_violation_records(
-        self,
-        user_id: str,
-        group_id: str | None = None,
-        limit: int = 50
+        self, user_id: str, group_id: str | None = None, limit: int = 50
     ) -> list[dict]:
         """
         获取用户违规记录
@@ -504,23 +536,21 @@ class DatabaseManager:
                     """SELECT * FROM violation_records
                        WHERE user_id = ? AND group_id = ?
                        ORDER BY violation_time DESC LIMIT ?""",
-                    (user_id, group_id, limit)
+                    (user_id, group_id, limit),
                 )
             else:
                 await cursor.execute(
                     """SELECT * FROM violation_records
                        WHERE user_id = ?
                        ORDER BY violation_time DESC LIMIT ?""",
-                    (user_id, limit)
+                    (user_id, limit),
                 )
 
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
     async def delete_user_violations(
-        self,
-        user_id: str,
-        group_id: str | None = None
+        self, user_id: str, group_id: str | None = None
     ) -> int:
         """
         删除用户违规记录
@@ -540,20 +570,18 @@ class DatabaseManager:
             if group_id:
                 await cursor.execute(
                     "DELETE FROM violation_records WHERE user_id = ? AND group_id = ?",
-                    (user_id, group_id)
+                    (user_id, group_id),
                 )
                 await cursor.execute(
                     "DELETE FROM user_violation_stats WHERE user_id = ? AND group_id = ?",
-                    (user_id, group_id)
+                    (user_id, group_id),
                 )
             else:
                 await cursor.execute(
-                    "DELETE FROM violation_records WHERE user_id = ?",
-                    (user_id,)
+                    "DELETE FROM violation_records WHERE user_id = ?", (user_id,)
                 )
                 await cursor.execute(
-                    "DELETE FROM user_violation_stats WHERE user_id = ?",
-                    (user_id,)
+                    "DELETE FROM user_violation_stats WHERE user_id = ?", (user_id,)
                 )
 
             await conn.commit()
@@ -567,7 +595,7 @@ class DatabaseManager:
         user_name: str,
         message_content: str,
         message_type: str = "text",
-        image_url: str | None = None
+        image_url: str | None = None,
     ):
         """
         缓存消息用于违规时转发
@@ -589,15 +617,19 @@ class DatabaseManager:
                 """INSERT OR REPLACE INTO message_cache
                    (group_id, message_id, user_id, user_name, message_content, message_type, image_url)
                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (group_id, message_id, user_id, user_name, message_content, message_type, image_url)
+                (
+                    group_id,
+                    message_id,
+                    user_id,
+                    user_name,
+                    message_content,
+                    message_type,
+                    image_url,
+                ),
             )
             await conn.commit()
 
-    async def get_recent_messages(
-        self,
-        group_id: str,
-        count: int = 5
-    ) -> list[dict]:
+    async def get_recent_messages(self, group_id: str, count: int = 5) -> list[dict]:
         """
         获取最近的群消息
 
@@ -617,7 +649,7 @@ class DatabaseManager:
                 """SELECT * FROM message_cache
                    WHERE group_id = ?
                    ORDER BY created_at DESC LIMIT ?""",
-                (group_id, count)
+                (group_id, count),
             )
             rows = await cursor.fetchall()
             return [dict(row) for row in reversed(rows)]
@@ -635,8 +667,7 @@ class DatabaseManager:
             cursor = await conn.cursor()
             cutoff_time = (datetime.now() - timedelta(hours=max_age_hours)).isoformat()
             await cursor.execute(
-                "DELETE FROM message_cache WHERE created_at < ?",
-                (cutoff_time,)
+                "DELETE FROM message_cache WHERE created_at < ?", (cutoff_time,)
             )
             await conn.commit()
 
@@ -667,10 +698,7 @@ class DatabaseManager:
             await cursor.execute("DELETE FROM blacklist")
             await conn.commit()
 
-            return {
-                "whitelist": whitelist_count,
-                "blacklist": blacklist_count
-            }
+            return {"whitelist": whitelist_count, "blacklist": blacklist_count}
 
     # ========== 人工白名单管理 ==========
 
@@ -681,13 +709,14 @@ class DatabaseManager:
         async with aiosqlite.connect(self._db_path) as conn:
             cursor = await conn.cursor()
             await cursor.execute(
-                "SELECT id FROM manual_whitelist WHERE md5_hash = ?",
-                (md5_hash,)
+                "SELECT id FROM manual_whitelist WHERE md5_hash = ?", (md5_hash,)
             )
             result = await cursor.fetchone()
             return result is not None
 
-    async def add_manual_whitelist(self, md5_hash: str, added_by: str = None, reason: str = None) -> bool:
+    async def add_manual_whitelist(
+        self, md5_hash: str, added_by: str = None, reason: str = None
+    ) -> bool:
         """添加到人工白名单"""
         await self._init_db()
 
@@ -696,7 +725,7 @@ class DatabaseManager:
             try:
                 await cursor.execute(
                     "INSERT INTO manual_whitelist (md5_hash, added_by, reason) VALUES (?, ?, ?)",
-                    (md5_hash, added_by, reason)
+                    (md5_hash, added_by, reason),
                 )
                 await conn.commit()
                 return True
@@ -710,8 +739,7 @@ class DatabaseManager:
         async with aiosqlite.connect(self._db_path) as conn:
             cursor = await conn.cursor()
             await cursor.execute(
-                "DELETE FROM manual_whitelist WHERE md5_hash = ?",
-                (md5_hash,)
+                "DELETE FROM manual_whitelist WHERE md5_hash = ?", (md5_hash,)
             )
             await conn.commit()
             return cursor.rowcount > 0
@@ -737,14 +765,16 @@ class DatabaseManager:
             cursor = await conn.cursor()
             await cursor.execute(
                 "SELECT * FROM manual_whitelist ORDER BY created_at DESC LIMIT ?",
-                (limit,)
+                (limit,),
             )
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
     # ========== 人工黑名单管理 ==========
 
-    async def check_manual_blacklist(self, md5_hash: str) -> tuple[RiskLevel, str] | None:
+    async def check_manual_blacklist(
+        self, md5_hash: str
+    ) -> tuple[RiskLevel, str] | None:
         """检查MD5是否在人工黑名单中"""
         await self._init_db()
 
@@ -752,7 +782,7 @@ class DatabaseManager:
             cursor = await conn.cursor()
             await cursor.execute(
                 "SELECT risk_level, risk_reason FROM manual_blacklist WHERE md5_hash = ?",
-                (md5_hash,)
+                (md5_hash,),
             )
             result = await cursor.fetchone()
             if result:
@@ -765,7 +795,7 @@ class DatabaseManager:
         risk_level: RiskLevel,
         risk_reason: str,
         added_by: str = None,
-        reason: str = None
+        reason: str = None,
     ) -> bool:
         """添加到人工黑名单"""
         await self._init_db()
@@ -777,7 +807,7 @@ class DatabaseManager:
                     """INSERT INTO manual_blacklist
                        (md5_hash, risk_level, risk_reason, added_by, reason)
                        VALUES (?, ?, ?, ?, ?)""",
-                    (md5_hash, risk_level.value, risk_reason, added_by, reason)
+                    (md5_hash, risk_level.value, risk_reason, added_by, reason),
                 )
                 await conn.commit()
                 return True
@@ -791,8 +821,7 @@ class DatabaseManager:
         async with aiosqlite.connect(self._db_path) as conn:
             cursor = await conn.cursor()
             await cursor.execute(
-                "DELETE FROM manual_blacklist WHERE md5_hash = ?",
-                (md5_hash,)
+                "DELETE FROM manual_blacklist WHERE md5_hash = ?", (md5_hash,)
             )
             await conn.commit()
             return cursor.rowcount > 0
@@ -818,7 +847,7 @@ class DatabaseManager:
             cursor = await conn.cursor()
             await cursor.execute(
                 "SELECT * FROM manual_blacklist ORDER BY created_at DESC LIMIT ?",
-                (limit,)
+                (limit,),
             )
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
@@ -832,8 +861,7 @@ class DatabaseManager:
         async with aiosqlite.connect(self._db_path) as conn:
             cursor = await conn.cursor()
             await cursor.execute(
-                "DELETE FROM whitelist WHERE md5_hash = ?",
-                (md5_hash,)
+                "DELETE FROM whitelist WHERE md5_hash = ?", (md5_hash,)
             )
             await conn.commit()
             return cursor.rowcount > 0
@@ -845,8 +873,7 @@ class DatabaseManager:
         async with aiosqlite.connect(self._db_path) as conn:
             cursor = await conn.cursor()
             await cursor.execute(
-                "DELETE FROM blacklist WHERE md5_hash = ?",
-                (md5_hash,)
+                "DELETE FROM blacklist WHERE md5_hash = ?", (md5_hash,)
             )
             await conn.commit()
             return cursor.rowcount > 0
