@@ -5,14 +5,16 @@
 
 import asyncio
 import os
-from typing import Any, Optional, Tuple
+from typing import Any
 
 import aiohttp
 
-from .censor_base import CensorBase, CensorError
-from .censor_aliyun import AliyunCensor
-from .database import DatabaseManager, RiskLevel
+from astrbot.api import logger
 
+from .censor_aliyun import AliyunCensor
+from .censor_base import CensorBase, CensorError
+from .censor_vlai import VLAICensor
+from .database import DatabaseManager, RiskLevel
 
 # 单例会话管理
 _download_session = None
@@ -26,23 +28,49 @@ async def _ensure_download_session():
     if _download_semaphore is None:
         _download_semaphore = asyncio.Semaphore(20)  # 限制并发下载数
 
-async def download_image(url: str) -> bytes:
+async def download_image(url: str, max_size_mb: int = 10) -> bytes:
     """
     异步下载图片
 
     Args:
         url: 图片URL地址
+        max_size_mb: 最大允许的图片大小（MB），默认10MB
 
     Returns:
         图片的原始字节数据
+
+    Raises:
+        CensorError: 下载失败或图片过大
     """
     await _ensure_download_session()
     proxy = os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY")
+    max_size_bytes = max_size_mb * 1024 * 1024
+
     async with _download_semaphore:
         async with _download_session.get(url, proxy=proxy) as resp:
             if resp.status != 200:
                 raise CensorError(f"图片下载失败，状态码: {resp.status}")
-            return await resp.read()
+
+            # 检查Content-Length头
+            content_length = resp.headers.get("Content-Length")
+            if content_length:
+                try:
+                    size = int(content_length)
+                    if size > max_size_bytes:
+                        raise CensorError(f"图片过大: {size / 1024 / 1024:.2f}MB，超过限制 {max_size_mb}MB")
+                except ValueError:
+                    pass  # 如果解析失败，继续下载并在读取时检查
+
+            # 流式读取并检查大小
+            chunks = []
+            total_size = 0
+            async for chunk in resp.content.iter_chunked(8192):
+                chunks.append(chunk)
+                total_size += len(chunk)
+                if total_size > max_size_bytes:
+                    raise CensorError(f"图片过大，超过限制 {max_size_mb}MB")
+
+            return b"".join(chunks)
 
 async def close_download_session():
     """关闭下载会话"""
@@ -58,7 +86,8 @@ class CensorFlow:
     def __init__(
         self,
         config: dict[str, Any],
-        db_manager: DatabaseManager
+        db_manager: DatabaseManager,
+        context: Any = None
     ):
         """
         初始化审核流程管理器
@@ -66,10 +95,12 @@ class CensorFlow:
         Args:
             config: 插件配置
             db_manager: 数据库管理器
+            context: AstrBot 上下文对象（VLAI 审核器需要）
         """
         self._config = config
         self._db = db_manager
-        self._image_censor: Optional[CensorBase] = None
+        self._context = context
+        self._image_censor: CensorBase | None = None
 
         # 缓存配置
         self._base_expire_hours = config.get("cache_settings", {}).get("base_expire_hours", 2)
@@ -94,8 +125,6 @@ class CensorFlow:
 
     async def _init_censors(self):
         """初始化审核器"""
-        import logging
-        logger = logging.getLogger(__name__)
         image_provider = self._config.get("image_censor_provider", "Aliyun")
         logger.debug(f"初始化审核器，提供商: {image_provider}")
         if image_provider == "Aliyun":
@@ -107,6 +136,15 @@ class CensorFlow:
                 logger.debug("阿里云审核器初始化完成")
             else:
                 logger.debug("阿里云配置不完整，跳过初始化")
+        elif image_provider == "VLAI":
+            vlai_config = self._config.get("vlai", {})
+            if self._context:
+                logger.debug("开始初始化 VLAI 审核器")
+                self._image_censor = VLAICensor(vlai_config, self._context)
+                await self._image_censor.initialize()
+                logger.debug("VLAI 审核器初始化完成")
+            else:
+                logger.error("VLAI 审核器需要 AstrBot 上下文对象，但未提供")
         else:
             logger.debug(f"未知的审核提供商: {image_provider}")
 
@@ -128,8 +166,8 @@ class CensorFlow:
         self,
         image_url: str,
         group_id: str,
-        precalculated_md5: Optional[str] = None
-    ) -> Tuple[RiskLevel, str, Optional[str]]:
+        precalculated_md5: str | None = None
+    ) -> tuple[RiskLevel, str, str | None]:
         """
         提交图片进行审核
 
@@ -157,21 +195,43 @@ class CensorFlow:
                 md5_hash = DatabaseManager.calculate_md5(image_data)
                 logger.debug(f"计算MD5完成: {md5_hash}")
 
-            # 1. 检查白名单
-            logger.debug("检查白名单")
-            if await self._db.check_whitelist(md5_hash):
-                logger.debug(f"图片在白名单中，MD5: {md5_hash}")
-                return RiskLevel.Pass, "白名单图片", md5_hash
+            # 1. 检查人工白名单（最高优先级）
+            logger.debug("检查人工白名单")
+            if await self._db.check_manual_whitelist(md5_hash):
+                logger.debug(f"图片在人工白名单中，MD5: {md5_hash}")
+                return RiskLevel.Pass, "人工白名单图片", md5_hash
 
-            # 2. 检查黑名单
-            logger.debug("检查黑名单")
-            blacklist_result = await self._db.check_blacklist(md5_hash)
-            if blacklist_result:
-                risk_level, risk_reason = blacklist_result
-                logger.debug(f"图片在黑名单中，风险等级: {risk_level.name}, 原因: {risk_reason}")
-                return risk_level, f"黑名单图片: {risk_reason}", md5_hash
+            # 2. 检查人工黑名单（最高优先级）
+            logger.debug("检查人工黑名单")
+            manual_blacklist_result = await self._db.check_manual_blacklist(md5_hash)
+            if manual_blacklist_result:
+                risk_level, risk_reason = manual_blacklist_result
+                logger.debug(f"图片在人工黑名单中，风险等级: {risk_level.name}, 原因: {risk_reason}")
+                return risk_level, f"人工黑名单图片: {risk_reason}", md5_hash
 
-            # 3. 调用API审核
+            # 3. 检查自动白名单（如果未关闭）
+            disable_auto_whitelist = self._config.get("disable_auto_whitelist", False)
+            if not disable_auto_whitelist:
+                logger.debug("检查自动白名单")
+                if await self._db.check_whitelist(md5_hash):
+                    logger.debug(f"图片在自动白名单中，MD5: {md5_hash}")
+                    return RiskLevel.Pass, "白名单图片", md5_hash
+            else:
+                logger.debug("自动白名单已禁用，跳过检查")
+
+            # 4. 检查自动黑名单（如果未关闭）
+            disable_auto_blacklist = self._config.get("disable_auto_blacklist", False)
+            if not disable_auto_blacklist:
+                logger.debug("检查自动黑名单")
+                blacklist_result = await self._db.check_blacklist(md5_hash)
+                if blacklist_result:
+                    risk_level, risk_reason = blacklist_result
+                    logger.debug(f"图片在黑名单中，风险等级: {risk_level.name}, 原因: {risk_reason}")
+                    return risk_level, f"黑名单图片: {risk_reason}", md5_hash
+            else:
+                logger.debug("自动黑名单已禁用，跳过检查")
+
+            # 5. 调用API审核
             if not self._image_censor:
                 logger.debug("未配置审核器，直接通过")
                 return RiskLevel.Pass, "未配置审核器", md5_hash
@@ -183,25 +243,31 @@ class CensorFlow:
             risk_reason = ", ".join(risk_words) if risk_words else ""
             logger.debug(f"API审核完成，风险等级: {risk_level.name}, 原因: {risk_reason}")
 
-            # 4. 根据审核结果更新黑白名单
+            # 6. 根据审核结果更新自动黑白名单（如果未关闭）
             if risk_level == RiskLevel.Pass:
-                logger.debug(f"图片审核通过，添加到白名单: {md5_hash}")
-                await self._db.add_to_whitelist(
-                    md5_hash,
-                    base_expire_hours=self._base_expire_hours,
-                    max_expire_days=self._max_expire_days
-                )
-                logger.debug("添加到白名单完成")
+                if not disable_auto_whitelist:
+                    logger.debug(f"图片审核通过，添加到自动白名单: {md5_hash}")
+                    await self._db.add_to_whitelist(
+                        md5_hash,
+                        base_expire_hours=self._base_expire_hours,
+                        max_expire_days=self._max_expire_days
+                    )
+                    logger.debug("添加到自动白名单完成")
+                else:
+                    logger.debug("自动白名单已禁用，不添加到白名单")
             elif risk_level in (RiskLevel.Review, RiskLevel.Block):
-                logger.debug(f"图片审核违规，添加到黑名单: {md5_hash}, 风险等级: {risk_level.name}")
-                await self._db.add_to_blacklist(
-                    md5_hash,
-                    risk_level,
-                    risk_reason,
-                    base_expire_hours=self._base_expire_hours,
-                    max_expire_days=self._max_expire_days
-                )
-                logger.debug("添加到黑名单完成")
+                if not disable_auto_blacklist:
+                    logger.debug(f"图片审核违规，添加到自动黑名单: {md5_hash}, 风险等级: {risk_level.name}")
+                    await self._db.add_to_blacklist(
+                        md5_hash,
+                        risk_level,
+                        risk_reason,
+                        base_expire_hours=self._base_expire_hours,
+                        max_expire_days=self._max_expire_days
+                    )
+                    logger.debug("添加到自动黑名单完成")
+                else:
+                    logger.debug("自动黑名单已禁用，不添加到黑名单")
 
             logger.debug(f"图片审核流程完成，最终结果: 风险等级={risk_level.name}, 原因={risk_reason}, MD5={md5_hash}")
             return risk_level, risk_reason, md5_hash

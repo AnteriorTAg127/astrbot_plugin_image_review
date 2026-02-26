@@ -5,7 +5,7 @@
 
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Any, Optional, Set, Tuple
+from typing import Any
 
 
 class RiskLevel(Enum):
@@ -36,7 +36,7 @@ class CensorBase(ABC):
         self._config = config
 
     @abstractmethod
-    async def detect_text(self, text: str) -> Tuple[RiskLevel, Set[str]]:
+    async def detect_text(self, text: str) -> tuple[RiskLevel, set[str]]:
         """
         检测文本内容
 
@@ -49,7 +49,7 @@ class CensorBase(ABC):
         pass
 
     @abstractmethod
-    async def detect_image(self, image: str) -> Tuple[RiskLevel, Set[str]]:
+    async def detect_image(self, image: str) -> tuple[RiskLevel, set[str]]:
         """
         检测图片内容
 
@@ -86,7 +86,12 @@ class CensorBase(ABC):
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """异步上下文管理器出口"""
-        await self.close()
+        try:
+            await self.close()
+        except Exception as e:
+            # 记录异常但不掩盖原始异常
+            import logging
+            logging.getLogger(__name__).error(f"关闭审核器资源时发生异常: {e}")
 
     @abstractmethod
     async def close(self):

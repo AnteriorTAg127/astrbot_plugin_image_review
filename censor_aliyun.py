@@ -4,12 +4,15 @@
 """
 
 import asyncio
-import base64
 import json
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Set, Tuple
+from typing import Any
 
 import aiohttp
+from alibabacloud_green20220302 import models
+from alibabacloud_green20220302.client import Client
+from alibabacloud_tea_openapi.models import Config
+from alibabacloud_tea_util import models as util_models
 
 from .censor_base import CensorBase, CensorError
 from .database import RiskLevel
@@ -46,12 +49,12 @@ class AliyunCensor(CensorBase):
         if self._session:
             await self._session.close()
             self._session = None
-        # 关闭线程池
+        # 关闭线程池 - 使用 wait=True 确保任务完成，但设置超时避免无限等待
         if self._executor:
-            self._executor.shutdown(wait=False)
+            self._executor.shutdown(wait=True)
             self._executor = None
 
-    async def detect_text(self, text: str) -> Tuple[RiskLevel, Set[str]]:
+    async def detect_text(self, text: str) -> tuple[RiskLevel, set[str]]:
         """
         对文本进行内容审核
 
@@ -74,7 +77,7 @@ class AliyunCensor(CensorBase):
         results = await asyncio.gather(*tasks)
 
         highest_risk_level = RiskLevel.Pass
-        all_risk_words: Set[str] = set()
+        all_risk_words: set[str] = set()
 
         for risk_level, words in results:
             if risk_level.value > highest_risk_level.value:
@@ -83,7 +86,7 @@ class AliyunCensor(CensorBase):
 
         return highest_risk_level, all_risk_words
 
-    async def _check_single_text(self, content: str) -> Tuple[RiskLevel, Set[str]]:
+    async def _check_single_text(self, content: str) -> tuple[RiskLevel, set[str]]:
         """
         审核单段文本
 
@@ -93,11 +96,6 @@ class AliyunCensor(CensorBase):
         Returns:
             (风险等级, 风险词集合)
         """
-        from alibabacloud_green20220302.client import Client
-        from alibabacloud_green20220302 import models
-        from alibabacloud_tea_openapi.models import Config
-        from alibabacloud_tea_util import models as util_models
-
         try:
             config = Config(
                 access_key_id=self._key_id,
@@ -129,11 +127,11 @@ class AliyunCensor(CensorBase):
 
                 data = body.data
                 risk_level = data.risk_level.lower() if data.risk_level else "pass"
-                risk_words_set: Set[str] = set()
+                risk_words_set: set[str] = set()
 
                 if data.result:
                     for r_data in data.result:
-                        if hasattr(r_data, 'risk_words') and r_data.risk_words:
+                        if hasattr(r_data, "risk_words") and r_data.risk_words:
                             risk_words_list = [word.strip() for word in r_data.risk_words.split(",")]
                             risk_words_set.update(risk_words_list)
 
@@ -149,7 +147,7 @@ class AliyunCensor(CensorBase):
         except Exception as e:
             raise CensorError(f"阿里云文本审核请求失败: {e}")
 
-    async def detect_image(self, image: str) -> Tuple[RiskLevel, Set[str]]:
+    async def detect_image(self, image: str) -> tuple[RiskLevel, set[str]]:
         """
         对图片进行内容审核
 
@@ -166,11 +164,6 @@ class AliyunCensor(CensorBase):
 
         if not image.startswith("http"):
             raise CensorError("预期外的输入")
-
-        from alibabacloud_green20220302.client import Client
-        from alibabacloud_green20220302 import models
-        from alibabacloud_tea_openapi.models import Config
-        from alibabacloud_tea_util import models as util_models
 
         try:
             config = Config(
@@ -206,15 +199,15 @@ class AliyunCensor(CensorBase):
 
                 data = body.data
                 risk_level = data.risk_level.lower() if data.risk_level else "pass"
-                reason_words_set: Set[str] = set()
+                reason_words_set: set[str] = set()
 
                 if data.result:
                     for item in data.result:
-                        if hasattr(item, 'label') and item.label:
+                        if hasattr(item, "label") and item.label:
                             reason_words_set.add(item.label)
-                        if hasattr(item, 'sub_label') and item.sub_label:
+                        if hasattr(item, "sub_label") and item.sub_label:
                             reason_words_set.add(item.sub_label)
-                        if hasattr(item, 'description') and item.description:
+                        if hasattr(item, "description") and item.description:
                             reason_words_set.add(item.description)
 
                 if risk_level in ("none", "low"):

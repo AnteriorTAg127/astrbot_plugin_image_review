@@ -2,15 +2,27 @@
     "image_censor_provider": {
         "type": "string",
         "description": "图片审核提供商",
-        "hint": "可选: Aliyun",
+        "hint": "可选: Aliyun, VLAI",
         "default": "Aliyun",
-        "options": ["Aliyun"]
+        "options": ["Aliyun", "VLAI"]
     },
     "enable_image_censor": {
         "type": "bool",
         "description": "是否启用图片审核",
         "hint": "开启后将对图片进行内容审核",
         "default": true
+    },
+    "disable_auto_whitelist": {
+        "type": "bool",
+        "description": "关闭自动白名单",
+        "hint": "启用后禁用系统的自动白名单判定机制，所有白名单判定仅基于人工配置数据",
+        "default": false
+    },
+    "disable_auto_blacklist": {
+        "type": "bool",
+        "description": "关闭自动黑名单",
+        "hint": "启用后禁用系统的自动黑名单判定机制，所有黑名单判定仅基于人工配置数据",
+        "default": false
     },
     "aliyun": {
         "type": "object",
@@ -37,6 +49,24 @@
                 "description": "图片审核信息类型",
                 "hint": "可选: customImage, textInImage，多个用逗号分隔",
                 "default": "customImage,textInImage"
+            }
+        }
+    },
+    "vlai": {
+        "type": "object",
+        "description": "VLAI 视觉语言模型审核配置",
+        "items": {
+            "provider_id": {
+                "type": "string",
+                "description": "LLM 提供商 ID",
+                "hint": "可选，指定使用的 LLM 提供商 ID，留空则使用默认提供商",
+                "default": ""
+            },
+            "censor_prompt": {
+                "type": "text",
+                "description": "图片审核提示词",
+                "hint": "用于指导 AI 审核图片内容的提示词，可自定义审核标准和输出格式",
+                "default": "请分析这张图片是否有显著色情违规内容（性暗示动作，如：露出、叉腿、跪趴，性行为、透明雨衣、性玩具。\n\n在对应语境下的包含「射精」及其同音词文本的。\n请严格按照以下格式回复（只回复这一行）：\n结果: [正常/违规] | 原因: [简要描述]\n\n如果图片正常，回复: 结果: 正常 | 原因: 无\n如果图片违规，回复: 结果: 违规 | 原因: [具体违规类型]"
             }
         }
     },

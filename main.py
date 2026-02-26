@@ -4,17 +4,50 @@
 """
 
 import os
+import re
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
-from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.star import Context, Star, register
-from astrbot.api import logger
+import aiofiles
+
 import astrbot.api.message_components as Comp
+from astrbot.api import logger
+from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.star import Context, Star, register
 
-from .database import DatabaseManager, RiskLevel
-from .censor_flow import CensorFlow
 from .censor_base import CensorError
+from .censor_flow import CensorFlow
+from .database import DatabaseManager, RiskLevel
+
+
+def _sanitize_filename(filename: str) -> str:
+    """
+    清理文件名，防止路径遍历攻击
+
+    Args:
+        filename: 原始文件名或路径片段
+
+    Returns:
+        清理后的安全文件名
+    """
+    if not filename:
+        return "unknown"
+
+    # 移除路径分隔符和特殊字符
+    # 替换 Windows 和 Unix 的路径分隔符
+    sanitized = filename.replace("\\", "_").replace("/", "_")
+
+    # 移除 .. 防止路径遍历
+    sanitized = sanitized.replace("..", "_")
+
+    # 移除其他危险字符
+    sanitized = re.sub(r'[<>:"|?*]', "_", sanitized)
+
+    # 限制长度
+    if len(sanitized) > 100:
+        sanitized = sanitized[:100]
+
+    return sanitized or "unknown"
 
 
 @register("image_review", "AstrBot", "图片审核插件，提供图片内容审核、违规处理、管理群通知等功能", "1.0.0")
@@ -52,25 +85,25 @@ class ImageReviewPlugin(Star):
         logger.debug(f"已加载 {len(self._group_config)} 个群聊配置")
 
         # 审核流程管理器（延迟初始化）
-        self._censor_flow: Optional[CensorFlow] = None
+        self._censor_flow: CensorFlow | None = None
         logger.debug("图片审核插件初始化完成")
 
     def _load_group_config(self):
         """加载群聊配置"""
         group_settings = self._config.get("group_settings", [])
         logger.debug(f"开始加载群聊配置，共 {len(group_settings)} 个配置项")
-        
+
         # 如果是旧格式的dict（兼容旧版本配置）
         if isinstance(group_settings, dict):
             group_settings = [group_settings]
             logger.debug("检测到旧格式配置，已转换为列表格式")
-        
+
         for i, setting in enumerate(group_settings):
             # 确保是有效配置
             if not isinstance(setting, dict):
                 logger.debug(f"配置项 {i+1} 不是字典类型，跳过")
                 continue
-                
+
             # 跳过非启用的配置（兼容template_list格式）
             if not setting.get("enabled", True):
                 logger.debug(f"配置项 {i+1} 未启用，跳过")
@@ -78,18 +111,25 @@ class ImageReviewPlugin(Star):
             group_id = str(setting.get("group_id", ""))
             manage_group_id = str(setting.get("manage_group_id", ""))
             if group_id and manage_group_id:
+                # 验证并规范化配置值
+                first_mute_duration = max(0, int(setting.get("first_mute_duration", 600)))
+                max_mute_duration = min(
+                    max(0, int(setting.get("max_mute_duration", 2419200))),
+                    2419200  # 最大28天
+                )
+                mute_multiplier = max(1, int(setting.get("mute_multiplier", 2)))
+                base_expire_hours = max(1, int(setting.get("base_expire_hours", 2)))
+                max_expire_days = max(1, min(int(setting.get("max_expire_days", 14)), 365))  # 最多365天
+
                 # 保存每个群的完整配置
                 self._group_config[group_id] = {
                     "manage_group_id": manage_group_id,
-                    "first_mute_duration": setting.get("first_mute_duration", 600),
-                    "max_mute_duration": min(
-                        setting.get("max_mute_duration", 2419200),
-                        2419200  # 最大28天
-                    ),
-                    "mute_multiplier": setting.get("mute_multiplier", 2),
+                    "first_mute_duration": first_mute_duration,
+                    "max_mute_duration": max_mute_duration,
+                    "mute_multiplier": mute_multiplier,
                     "auto_recall": setting.get("auto_recall", True),
-                    "base_expire_hours": setting.get("base_expire_hours", 2),
-                    "max_expire_days": setting.get("max_expire_days", 14),
+                    "base_expire_hours": base_expire_hours,
+                    "max_expire_days": max_expire_days,
                 }
                 logger.info(f"已加载群聊配置: 群{group_id} -> 管理群{manage_group_id}")
             else:
@@ -100,8 +140,8 @@ class ImageReviewPlugin(Star):
         """插件初始化"""
         try:
             logger.debug("开始初始化图片审核插件")
-            # 初始化审核流程管理器
-            self._censor_flow = CensorFlow(self._config, self._db)
+            # 初始化审核流程管理器，传入 context 以支持 VLAI 审核器
+            self._censor_flow = CensorFlow(self._config, self._db, self.context)
             logger.debug("审核流程管理器创建完成，开始初始化")
             await self._censor_flow.initialize()
             logger.debug("审核流程管理器初始化完成")
@@ -123,7 +163,7 @@ class ImageReviewPlugin(Star):
             logger.debug("审核流程管理器已关闭")
         logger.info("图片审核插件已卸载")
 
-    def _get_group_config(self, group_id: str) -> Optional[dict]:
+    def _get_group_config(self, group_id: str) -> dict | None:
         """
         获取群聊的完整配置
 
@@ -135,7 +175,7 @@ class ImageReviewPlugin(Star):
         """
         return self._group_config.get(group_id)
 
-    def _get_manage_group_id(self, group_id: str) -> Optional[str]:
+    def _get_manage_group_id(self, group_id: str) -> str | None:
         """
         获取群聊对应的管理群ID
 
@@ -148,7 +188,7 @@ class ImageReviewPlugin(Star):
         config = self._group_config.get(group_id)
         return config["manage_group_id"] if config else None
 
-    def _get_group_id_by_manage_group(self, manage_group_id: str) -> Optional[str]:
+    def _get_group_id_by_manage_group(self, manage_group_id: str) -> str | None:
         """
         根据管理群ID反向查找主群ID
 
@@ -163,9 +203,11 @@ class ImageReviewPlugin(Star):
                 return group_id
         return None
 
-    def _extract_image_md5(self, event: AstrMessageEvent, image_comp: Comp.Image) -> Optional[str]:
+    def _extract_image_md5(self, event: AstrMessageEvent, image_comp: Comp.Image) -> str | None:
         """
-        从消息事件中提取图片的MD5值
+        从图片组件中提取图片的MD5值
+
+        从图片文件名中提取MD5，文件名格式通常为: 306AED23E3B7AA81B51A3B2A6FAAAF73.jpg
 
         Args:
             event: 消息事件
@@ -175,17 +217,21 @@ class ImageReviewPlugin(Star):
             图片MD5字符串，如果无法获取则返回None
         """
         try:
-            if hasattr(event.message_obj, 'raw'):
-                raw_data = event.message_obj.raw
-                if raw_data and 'elements' in raw_data:
-                    for element in raw_data.get('elements', []):
-                        if element.get('elementType') == 2:
-                            pic_element = element.get('picElement', {})
-                            md5_hex = pic_element.get('md5HexStr')
-                            if md5_hex:
-                                return md5_hex.lower()
-        except Exception:
-            pass
+            if image_comp.file:
+                # 从文件名中提取MD5（去掉扩展名）
+                file_name = image_comp.file
+                # 移除可能的URL参数
+                if "?" in file_name:
+                    file_name = file_name.split("?")[0]
+                # 移除路径，只保留文件名
+                file_name = os.path.basename(file_name)
+                # 移除扩展名，获取MD5
+                md5_hex = os.path.splitext(file_name)[0]
+                # 验证MD5格式（32位十六进制字符串）
+                if md5_hex and len(md5_hex) == 32:
+                    return md5_hex.lower()
+        except Exception as e:
+            logger.debug(f"提取图片MD5时发生异常: {e}")
         return None
 
     def _is_group_enabled(self, group_id: str) -> bool:
@@ -256,7 +302,7 @@ class ImageReviewPlugin(Star):
                 logger.debug("违规消息撤回完成")
 
             # 2. 计算禁言时长
-            logger.debug(f"计算禁言时长，获取用户违规次数")
+            logger.debug("计算禁言时长，获取用户违规次数")
             violation_count = await self._db.get_user_violation_count(user_id, group_id)
             logger.debug(f"用户当前违规次数: {violation_count}")
             first_mute = group_config.get("first_mute_duration", 600)
@@ -316,12 +362,14 @@ class ImageReviewPlugin(Star):
             platform_name = event.get_platform_name()
             logger.debug(f"开始撤回消息，平台: {platform_name}, 消息ID: {message_id}")
             if platform_name == "aiocqhttp":
-                from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
+                from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
+                    AiocqhttpMessageEvent,
+                )
                 if isinstance(event, AiocqhttpMessageEvent):
                     client = event.bot
-                    logger.debug(f"调用CQHTTP API撤回消息")
+                    logger.debug("调用CQHTTP API撤回消息")
                     await client.api.call_action(
-                        'delete_msg',
+                        "delete_msg",
                         message_id=message_id
                     )
                     logger.debug("消息撤回成功")
@@ -344,9 +392,9 @@ class ImageReviewPlugin(Star):
             保存后的本地文件路径
         """
         try:
-            from .censor_flow import download_image
             import hashlib
-            import aiofiles
+
+            from .censor_flow import download_image
 
             logger.debug(f"开始下载违规证据图片，URL: {image_url}")
 
@@ -356,17 +404,20 @@ class ImageReviewPlugin(Star):
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
             file_ext = ".jpg"
-            if image_data[:2] == b'\xff\xd8':
+            if image_data[:2] == b"\xff\xd8":
                 file_ext = ".jpg"
-            elif image_data[:4] == b'\x89PNG':
+            elif image_data[:4] == b"\x89PNG":
                 file_ext = ".png"
-            elif image_data[:3] == b'GIF':
+            elif image_data[:3] == b"GIF":
                 file_ext = ".gif"
 
-            file_name = f"{group_id}_{user_id}_{timestamp}_{md5_hash[:8]}{file_ext}"
+            # 使用安全的文件名（防止路径遍历攻击）
+            safe_group_id = _sanitize_filename(group_id)
+            safe_user_id = _sanitize_filename(user_id)
+            file_name = f"{safe_group_id}_{safe_user_id}_{timestamp}_{md5_hash[:8]}{file_ext}"
             file_path = os.path.join(self._evidence_dir, file_name)
 
-            async with aiofiles.open(file_path, 'wb') as f:
+            async with aiofiles.open(file_path, "wb") as f:
                 await f.write(image_data)
 
             logger.debug(f"证据图片已保存: {file_path}")
@@ -397,12 +448,14 @@ class ImageReviewPlugin(Star):
             platform_name = event.get_platform_name()
             logger.debug(f"开始禁言用户，平台: {platform_name}, 用户={user_id}, 群={group_id}, 时长={duration}秒")
             if platform_name == "aiocqhttp":
-                from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
+                from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
+                    AiocqhttpMessageEvent,
+                )
                 if isinstance(event, AiocqhttpMessageEvent):
                     client = event.bot
-                    logger.debug(f"调用CQHTTP API禁言用户")
+                    logger.debug("调用CQHTTP API禁言用户")
                     await client.api.call_action(
-                        'set_group_ban',
+                        "set_group_ban",
                         group_id=int(group_id),
                         user_id=int(user_id),
                         duration=duration
@@ -482,7 +535,7 @@ class ImageReviewPlugin(Star):
             logger.debug(f"违规信息构建完成，长度: {len(violation_info)} 字符")
 
             # 构建合并转发消息
-            from astrbot.api.message_components import Node, Plain, Image
+            from astrbot.api.message_components import Image, Node, Plain
 
             nodes = []
 
@@ -494,27 +547,21 @@ class ImageReviewPlugin(Star):
             ))
             logger.debug("违规信息节点添加完成")
 
-            # 添加违规图片节点（优先使用本地保存的证据图片）
-            if evidence_path:
-                nodes.append(Node(
-                    uin=int(user_id),
-                    name=user_name,
-                    content=[Image.fromFileSystem(evidence_path)]
-                ))
-                logger.debug("本地证据图片节点添加完成")
-            else:
-                nodes.append(Node(
-                    uin=int(user_id),
-                    name=user_name,
-                    content=[Image.fromURL(image_url)]
-                ))
-                logger.debug("URL图片节点添加完成")
+            # 添加违规图片节点（使用QQ图片URL，NapCat可直接下载）
+            nodes.append(Node(
+                uin=int(user_id),
+                name=user_name,
+                content=[Image.fromURL(image_url)]
+            ))
+            logger.debug("违规图片节点添加完成")
 
             # 发送到管理群
             platform_name = event.get_platform_name()
             logger.debug(f"发送到管理群，平台: {platform_name}")
             if platform_name == "aiocqhttp":
-                from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
+                from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
+                    AiocqhttpMessageEvent,
+                )
                 if isinstance(event, AiocqhttpMessageEvent):
                     client = event.bot
 
@@ -532,7 +579,7 @@ class ImageReviewPlugin(Star):
                     logger.debug(f"转发消息构建完成，共 {len(forward_msgs)} 个节点")
 
                     await client.api.call_action(
-                        'send_group_forward_msg',
+                        "send_group_forward_msg",
                         group_id=int(manage_group_id),
                         messages=forward_msgs
                     )
@@ -559,7 +606,9 @@ class ImageReviewPlugin(Star):
             if isinstance(comp, Comp.Plain):
                 result.append({"type": "text", "data": {"text": comp.text}})
             elif isinstance(comp, Comp.Image):
-                if comp.url:
+                if comp.file:
+                    result.append({"type": "image", "data": {"file": comp.file}})
+                elif comp.url:
                     result.append({"type": "image", "data": {"file": comp.url}})
         return result
 
@@ -581,7 +630,7 @@ class ImageReviewPlugin(Star):
                 return
 
             # 缓存消息（用于违规时转发上下文）
-            message_id = str(event.message_obj.message_id) if hasattr(event.message_obj, 'message_id') else ""
+            message_id = str(event.message_obj.message_id) if hasattr(event.message_obj, "message_id") else ""
             message_str = event.message_str
             logger.debug(f"消息ID: {message_id}, 消息内容: {message_str[:50]}...")
 
@@ -589,12 +638,10 @@ class ImageReviewPlugin(Star):
             message_chain = event.get_messages()
             image_url = None
             image_md5 = None
-            message_type = "text"
 
             for comp in message_chain:
                 if isinstance(comp, Comp.Image):
                     image_url = comp.url
-                    message_type = "image"
                     image_md5 = self._extract_image_md5(event, comp)
                     logger.debug(f"检测到图片消息，URL: {image_url}, MD5: {image_md5}")
                     break
@@ -624,7 +671,7 @@ class ImageReviewPlugin(Star):
 
             # 处理违规
             if risk_level in (RiskLevel.Review, RiskLevel.Block):
-                logger.debug(f"检测到违规图片，开始处理")
+                logger.debug("检测到违规图片，开始处理")
                 await self._handle_violation(
                     event, group_id, user_id, user_name,
                     md5_hash, image_url, risk_level, risk_reason, message_id
@@ -674,9 +721,9 @@ class ImageReviewPlugin(Star):
 
             # 构建回复
             result = f"📊 用户 {user_id} 的违规记录\n"
-            result += f"━━━━━━━━━━━━━━━\n"
+            result += "━━━━━━━━━━━━━━━\n"
             result += f"总违规次数: {violation_count}\n"
-            result += f"━━━━━━━━━━━━━━━\n"
+            result += "━━━━━━━━━━━━━━━\n"
 
             for i, record in enumerate(records[:5], 1):
                 violation_time = record.get("violation_time", "")
@@ -730,8 +777,14 @@ class ImageReviewPlugin(Star):
             image_provider = self._config.get("image_censor_provider", "未配置")
             status_info += f"图片审核提供商: {image_provider}\n"
 
+            # 显示 VLAI 配置
+            if image_provider == "VLAI":
+                vlai_config = self._config.get("vlai", {})
+                provider_id = vlai_config.get("provider_id", "")
+                status_info += f"VLAI 提供商ID: {provider_id if provider_id else '默认'}\n"
+
             # 检查群聊配置
-            status_info += f"\n已配置的群聊:\n"
+            status_info += "\n已配置的群聊:\n"
             for gid, config in self._group_config.items():
                 status_info += f"  群 {gid} -> 管理群 {config['manage_group_id']}\n"
 
@@ -759,13 +812,87 @@ class ImageReviewPlugin(Star):
             info += "━━━━━━━━━━━━━━━\n"
             info += f"白名单: {result['whitelist']} 条\n"
             info += f"黑名单: {result['blacklist']} 条\n"
-            info += f"注意: 消息缓存已取消，不再存储\n"
+            info += "注意: 消息缓存已取消，不再存储\n"
             info += "━━━━━━━━━━━━━━━"
 
             yield event.plain_result(info)
 
         except Exception as e:
             logger.error(f"清除缓存异常: {e}")
+
+    @filter.command("查询名单")
+    async def query_list_status(self, event: AstrMessageEvent):
+        """查询图片在黑白名单中的状态（管理群专用，需引用图片）"""
+        try:
+            manage_group_id = str(event.get_group_id()) if event.get_group_id() else None
+            if not manage_group_id:
+                return
+
+            if not self._is_manage_group(manage_group_id):
+                return
+
+            # 检查是否引用了消息
+            reply_info = self._extract_reply_info(event)
+            logger.debug(f"query_list_status: reply_info={reply_info}")
+            if not reply_info:
+                yield event.plain_result("❌ 请引用需要查询的图片消息")
+                return
+
+            message_id = reply_info.get("message_id")
+            logger.debug(f"query_list_status: message_id={message_id}")
+            if not message_id:
+                yield event.plain_result("❌ 无法获取引用消息ID")
+                return
+
+            # 获取被引用消息中的图片
+            logger.debug("query_list_status: 开始调用 _get_message_images")
+            image_md5s = await self._get_message_images(event, message_id)
+            logger.debug(f"query_list_status: _get_message_images 返回 {len(image_md5s)} 张图片")
+            if not image_md5s:
+                yield event.plain_result("❌ 引用的消息中没有图片")
+                return
+
+            result = "📋 图片名单状态查询\n"
+            result += "━━━━━━━━━━━━━━━\n"
+
+            for i, md5_hash in enumerate(image_md5s, 1):
+                result += f"\n图片 {i} (MD5: {md5_hash[:16]}...)\n"
+
+                # 检查人工白名单
+                in_manual_whitelist = await self._db.check_manual_whitelist(md5_hash)
+                result += f"  人工白名单: {'✅ 是' if in_manual_whitelist else '❌ 否'}\n"
+
+                # 检查人工黑名单
+                manual_blacklist_result = await self._db.check_manual_blacklist(md5_hash)
+                if manual_blacklist_result:
+                    result += f"  人工黑名单: ✅ 是 (等级: {manual_blacklist_result[0].name})\n"
+                else:
+                    result += "  人工黑名单: ❌ 否\n"
+
+                # 检查自动白名单
+                in_auto_whitelist = await self._db.check_whitelist(md5_hash)
+                result += f"  自动白名单: {'✅ 是' if in_auto_whitelist else '❌ 否'}\n"
+
+                # 检查自动黑名单
+                auto_blacklist_result = await self._db.check_blacklist(md5_hash)
+                if auto_blacklist_result:
+                    result += f"  自动黑名单: ✅ 是 (等级: {auto_blacklist_result[0].name})\n"
+                else:
+                    result += "  自动黑名单: ❌ 否\n"
+
+            # 显示配置状态
+            disable_auto_whitelist = self._config.get("disable_auto_whitelist", False)
+            disable_auto_blacklist = self._config.get("disable_auto_blacklist", False)
+            result += "\n━━━━━━━━━━━━━━━\n"
+            result += f"自动白名单禁用: {'✅ 是' if disable_auto_whitelist else '❌ 否'}\n"
+            result += f"自动黑名单禁用: {'✅ 是' if disable_auto_blacklist else '❌ 否'}\n"
+            result += "━━━━━━━━━━━━━━━"
+
+            yield event.plain_result(result)
+
+        except Exception as e:
+            logger.error(f"查询名单状态异常: {e}")
+            yield event.plain_result(f"❌ 操作失败: {str(e)}")
 
     @filter.command("删除违规")
     async def delete_violation(self, event: AstrMessageEvent, user_id_str: str = ""):
@@ -795,3 +922,479 @@ class ImageReviewPlugin(Star):
 
         except Exception as e:
             logger.error(f"删除违规记录异常: {e}")
+
+    def _extract_reply_image_md5(self, event: AstrMessageEvent) -> str | None:
+        """从回复消息中提取图片MD5"""
+        try:
+            if hasattr(event.message_obj, "raw"):
+                raw_data = event.message_obj.raw
+                if raw_data and "elements" in raw_data:
+                    for element in raw_data.get("elements", []):
+                        if element.get("elementType") == 2:
+                            pic_element = element.get("picElement", {})
+                            md5_hex = pic_element.get("md5HexStr")
+                            if md5_hex:
+                                return md5_hex.lower()
+            return None
+        except Exception as e:
+            logger.debug(f"从回复消息提取图片MD5时发生异常: {e}")
+            return None
+
+    def _extract_reply_info(self, event: AstrMessageEvent) -> dict | None:
+        """从回复消息中提取被引用消息的信息"""
+        try:
+            platform_name = event.get_platform_name()
+            logger.debug(f"_extract_reply_info: 平台={platform_name}")
+
+            # aiocqhttp 平台：从 raw_message 中解析 CQ:reply
+            if platform_name == "aiocqhttp":
+                raw_message_str = ""
+
+                # 尝试从 message_obj.raw_message 获取
+                # 注意：raw_message 可能是 Event 对象或字符串
+                try:
+                    raw_message = event.message_obj.raw_message
+                    if isinstance(raw_message, str):
+                        raw_message_str = raw_message
+                    elif hasattr(raw_message, "raw_message"):
+                        # 如果是 Event 对象，尝试获取其 raw_message 属性
+                        raw_message_str = raw_message.raw_message
+                    elif hasattr(raw_message, "get"):
+                        # 如果是 dict-like 对象
+                        raw_message_str = raw_message.get("raw_message", "")
+                    logger.debug(f"_extract_reply_info: raw_message_str={raw_message_str}")
+                except Exception as e:
+                    logger.debug(f"_extract_reply_info: 获取 raw_message 失败: {e}")
+
+                # 备选：从 message_str 获取
+                if not raw_message_str:
+                    raw_message_str = event.message_str or ""
+                    logger.debug(f"_extract_reply_info: message_str={raw_message_str}")
+
+                if raw_message_str:
+                    match = re.search(r"\[CQ:reply,id=(\d+)\]", raw_message_str)
+                    logger.debug(f"_extract_reply_info: 正则匹配结果={match}")
+                    if match:
+                        logger.debug(f"_extract_reply_info: 匹配成功, message_id={match.group(1)}")
+                        return {
+                            "message_id": match.group(1),
+                            "sender_uid": None,
+                            "sender_uid_str": None,
+                        }
+
+            # QQ官方/其他平台格式 (elementType == 7)
+            if hasattr(event.message_obj, "raw"):
+                raw_data = event.message_obj.raw
+                if raw_data and "elements" in raw_data:
+                    for element in raw_data.get("elements", []):
+                        if element.get("elementType") == 7:
+                            reply_element = element.get("replyElement", {})
+                            return {
+                                "message_id": reply_element.get("sourceMsgIdInRecords"),
+                                "sender_uid": reply_element.get("senderUid"),
+                                "sender_uid_str": reply_element.get("senderUidStr"),
+                            }
+
+            logger.debug("_extract_reply_info: 未找到引用信息")
+            return None
+        except Exception as e:
+            logger.debug(f"从回复消息提取信息时发生异常: {e}")
+            logger.debug(f"异常详情: {str(e)}")
+            return None
+
+    async def _get_message_images(self, event: AstrMessageEvent, message_id: str) -> list[str]:
+        """获取指定消息中的所有图片MD5"""
+        md5_list = []
+        logger.debug(f"_get_message_images: 方法被调用, message_id={message_id}")
+        try:
+            platform_name = event.get_platform_name()
+            logger.debug(f"_get_message_images: 平台={platform_name}, message_id={message_id}")
+
+            if platform_name == "aiocqhttp":
+                from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
+                    AiocqhttpMessageEvent,
+                )
+                if isinstance(event, AiocqhttpMessageEvent):
+                    client = event.bot
+                    # 使用 get_msg API 获取消息内容
+                    logger.debug(f"_get_message_images: 调用 get_msg API, message_id={message_id}")
+                    result = await client.api.call_action(
+                        "get_msg",
+                        message_id=int(message_id)
+                    )
+                    logger.debug(f"_get_message_images: get_msg 返回结果={result}")
+
+                    if result and "message" in result:
+                        message_list = result["message"]
+                        logger.debug(f"_get_message_images: 消息包含 {len(message_list)} 个元素")
+                        for msg in message_list:
+                            logger.debug(f"_get_message_images: 检查消息元素 type={msg.get('type')}")
+                            if msg.get("type") == "image":
+                                data = msg.get("data", {})
+                                # 优先从 md5 字段获取
+                                md5 = data.get("md5")
+                                # 如果没有 md5 字段，从 file 字段提取（文件名通常是 MD5）
+                                if not md5:
+                                    file_name = data.get("file", "")
+                                    # 文件名格式通常是 MD5.jpg 或 MD5.png 等
+                                    if file_name:
+                                        # 提取文件名中的 MD5 部分（去掉扩展名）
+                                        md5 = file_name.split(".")[0]
+                                        logger.debug(f"_get_message_images: 从文件名提取 md5={md5}")
+                                logger.debug(f"_get_message_images: 找到图片, md5={md5}")
+                                if md5:
+                                    md5_list.append(md5.lower())
+                    else:
+                        logger.debug("_get_message_images: 返回结果中没有 message 字段")
+                else:
+                    logger.debug("_get_message_images: 事件类型不匹配")
+            else:
+                logger.debug("_get_message_images: 非 aiocqhttp 平台，跳过")
+
+            logger.debug(f"_get_message_images: 共找到 {len(md5_list)} 张图片")
+        except Exception as e:
+            logger.debug(f"获取消息图片失败: {e}")
+            logger.debug(f"异常详情: {str(e)}")
+        return md5_list
+
+    # ========== 人工白名单管理指令 ==========
+
+    @filter.command("添加白名单")
+    async def add_manual_whitelist_cmd(self, event: AstrMessageEvent, reason: str = ""):
+        """添加图片到人工白名单（管理群专用，需引用图片）"""
+        try:
+            manage_group_id = str(event.get_group_id()) if event.get_group_id() else None
+            if not manage_group_id:
+                return
+
+            if not self._is_manage_group(manage_group_id):
+                return
+
+            # 检查是否引用了消息
+            reply_info = self._extract_reply_info(event)
+            if not reply_info:
+                yield event.plain_result("❌ 请引用需要添加到白名单的图片消息")
+                return
+
+            message_id = reply_info.get("message_id")
+            if not message_id:
+                yield event.plain_result("❌ 无法获取引用消息ID")
+                return
+
+            # 获取被引用消息中的图片
+            image_md5s = await self._get_message_images(event, message_id)
+            if not image_md5s:
+                yield event.plain_result("❌ 引用的消息中没有图片")
+                return
+
+            user_id = str(event.get_sender_id())
+            added_count = 0
+
+            for md5_hash in image_md5s:
+                success = await self._db.add_manual_whitelist(
+                    md5_hash=md5_hash,
+                    added_by=user_id,
+                    reason=reason if reason else None
+                )
+                if success:
+                    added_count += 1
+
+            if added_count > 0:
+                yield event.plain_result(f"✅ 成功添加 {added_count} 张图片到人工白名单")
+            else:
+                yield event.plain_result("⚠️ 图片已在人工白名单中")
+
+        except Exception as e:
+            logger.error(f"添加人工白名单异常: {e}")
+            yield event.plain_result(f"❌ 操作失败: {str(e)}")
+
+    @filter.command("移除白名单")
+    async def remove_manual_whitelist_cmd(self, event: AstrMessageEvent):
+        """从人工白名单移除图片（管理群专用，需引用图片）"""
+        try:
+            manage_group_id = str(event.get_group_id()) if event.get_group_id() else None
+            if not manage_group_id:
+                return
+
+            if not self._is_manage_group(manage_group_id):
+                return
+
+            # 检查是否引用了消息
+            reply_info = self._extract_reply_info(event)
+            if not reply_info:
+                yield event.plain_result("❌ 请引用需要从白名单移除的图片消息")
+                return
+
+            message_id = reply_info.get("message_id")
+            if not message_id:
+                yield event.plain_result("❌ 无法获取引用消息ID")
+                return
+
+            # 获取被引用消息中的图片
+            image_md5s = await self._get_message_images(event, message_id)
+            if not image_md5s:
+                yield event.plain_result("❌ 引用的消息中没有图片")
+                return
+
+            removed_count = 0
+            for md5_hash in image_md5s:
+                success = await self._db.remove_manual_whitelist(md5_hash)
+                if success:
+                    removed_count += 1
+
+            if removed_count > 0:
+                yield event.plain_result(f"✅ 成功从人工白名单移除 {removed_count} 张图片")
+            else:
+                yield event.plain_result("⚠️ 图片不在人工白名单中")
+
+        except Exception as e:
+            logger.error(f"移除人工白名单异常: {e}")
+            yield event.plain_result(f"❌ 操作失败: {str(e)}")
+
+    @filter.command("清空白名单")
+    async def clear_manual_whitelist_cmd(self, event: AstrMessageEvent, confirm: str = ""):
+        """清空人工白名单（管理群专用，需二次确认）"""
+        try:
+            manage_group_id = str(event.get_group_id()) if event.get_group_id() else None
+            if not manage_group_id:
+                return
+
+            if not self._is_manage_group(manage_group_id):
+                return
+
+            # 二次确认
+            if confirm.strip().lower() != "确认":
+                yield event.plain_result(
+                    "⚠️ 此操作将清空所有人工白名单数据，不可恢复！\n"
+                    "如需确认，请发送: /清空白名单 确认"
+                )
+                return
+
+            count = await self._db.clear_all_manual_whitelist()
+            yield event.plain_result(f"✅ 已清空人工白名单，共移除 {count} 条记录")
+
+        except Exception as e:
+            logger.error(f"清空人工白名单异常: {e}")
+            yield event.plain_result(f"❌ 操作失败: {str(e)}")
+
+    # ========== 人工黑名单管理指令 ==========
+
+    @filter.command("添加黑名单")
+    async def add_manual_blacklist_cmd(self, event: AstrMessageEvent, risk_level_str: str = "", *, reason: str = ""):
+        """添加图片到人工黑名单（管理群专用，需引用图片）"""
+        try:
+            manage_group_id = str(event.get_group_id()) if event.get_group_id() else None
+            if not manage_group_id:
+                return
+
+            if not self._is_manage_group(manage_group_id):
+                return
+
+            # 检查是否引用了消息
+            reply_info = self._extract_reply_info(event)
+            if not reply_info:
+                yield event.plain_result("❌ 请引用需要添加到黑名单的图片消息")
+                return
+
+            message_id = reply_info.get("message_id")
+            if not message_id:
+                yield event.plain_result("❌ 无法获取引用消息ID")
+                return
+
+            # 获取被引用消息中的图片
+            image_md5s = await self._get_message_images(event, message_id)
+            if not image_md5s:
+                yield event.plain_result("❌ 引用的消息中没有图片")
+                return
+
+            # 解析风险等级
+            risk_level = RiskLevel.Block
+            if risk_level_str:
+                risk_level_str = risk_level_str.strip().upper()
+                if risk_level_str == "REVIEW":
+                    risk_level = RiskLevel.Review
+                elif risk_level_str == "BLOCK":
+                    risk_level = RiskLevel.Block
+                else:
+                    yield event.plain_result("❌ 风险等级参数错误，可选: REVIEW(建议复审) 或 BLOCK(违规)")
+                    return
+
+            user_id = str(event.get_sender_id())
+            added_count = 0
+
+            for md5_hash in image_md5s:
+                success = await self._db.add_manual_blacklist(
+                    md5_hash=md5_hash,
+                    risk_level=risk_level,
+                    risk_reason=reason if reason else "人工添加",
+                    added_by=user_id,
+                    reason=reason if reason else None
+                )
+                if success:
+                    added_count += 1
+
+            if added_count > 0:
+                yield event.plain_result(f"✅ 成功添加 {added_count} 张图片到人工黑名单")
+            else:
+                yield event.plain_result("⚠️ 图片已在人工黑名单中")
+
+        except Exception as e:
+            logger.error(f"添加人工黑名单异常: {e}")
+            yield event.plain_result(f"❌ 操作失败: {str(e)}")
+
+    @filter.command("移除黑名单")
+    async def remove_manual_blacklist_cmd(self, event: AstrMessageEvent):
+        """从人工黑名单移除图片（管理群专用，需引用图片）"""
+        try:
+            manage_group_id = str(event.get_group_id()) if event.get_group_id() else None
+            if not manage_group_id:
+                return
+
+            if not self._is_manage_group(manage_group_id):
+                return
+
+            # 检查是否引用了消息
+            reply_info = self._extract_reply_info(event)
+            if not reply_info:
+                yield event.plain_result("❌ 请引用需要从黑名单移除的图片消息")
+                return
+
+            message_id = reply_info.get("message_id")
+            if not message_id:
+                yield event.plain_result("❌ 无法获取引用消息ID")
+                return
+
+            # 获取被引用消息中的图片
+            image_md5s = await self._get_message_images(event, message_id)
+            if not image_md5s:
+                yield event.plain_result("❌ 引用的消息中没有图片")
+                return
+
+            removed_count = 0
+            for md5_hash in image_md5s:
+                success = await self._db.remove_manual_blacklist(md5_hash)
+                if success:
+                    removed_count += 1
+
+            if removed_count > 0:
+                yield event.plain_result(f"✅ 成功从人工黑名单移除 {removed_count} 张图片")
+            else:
+                yield event.plain_result("⚠️ 图片不在人工黑名单中")
+
+        except Exception as e:
+            logger.error(f"移除人工黑名单异常: {e}")
+            yield event.plain_result(f"❌ 操作失败: {str(e)}")
+
+    @filter.command("清空黑名单")
+    async def clear_manual_blacklist_cmd(self, event: AstrMessageEvent, confirm: str = ""):
+        """清空人工黑名单（管理群专用，需二次确认）"""
+        try:
+            manage_group_id = str(event.get_group_id()) if event.get_group_id() else None
+            if not manage_group_id:
+                return
+
+            if not self._is_manage_group(manage_group_id):
+                return
+
+            # 二次确认
+            if confirm.strip().lower() != "确认":
+                yield event.plain_result(
+                    "⚠️ 此操作将清空所有人工黑名单数据，不可恢复！\n"
+                    "如需确认，请发送: /清空黑名单 确认"
+                )
+                return
+
+            count = await self._db.clear_all_manual_blacklist()
+            yield event.plain_result(f"✅ 已清空人工黑名单，共移除 {count} 条记录")
+
+        except Exception as e:
+            logger.error(f"清空人工黑名单异常: {e}")
+            yield event.plain_result(f"❌ 操作失败: {str(e)}")
+
+    # ========== 自动名单管理指令 ==========
+
+    @filter.command("移除自动白名单")
+    async def remove_auto_whitelist_cmd(self, event: AstrMessageEvent):
+        """从自动白名单移除图片（管理群专用，需引用图片）"""
+        try:
+            manage_group_id = str(event.get_group_id()) if event.get_group_id() else None
+            if not manage_group_id:
+                return
+
+            if not self._is_manage_group(manage_group_id):
+                return
+
+            # 检查是否引用了消息
+            reply_info = self._extract_reply_info(event)
+            if not reply_info:
+                yield event.plain_result("❌ 请引用需要移除的图片消息")
+                return
+
+            message_id = reply_info.get("message_id")
+            if not message_id:
+                yield event.plain_result("❌ 无法获取引用消息ID")
+                return
+
+            # 获取被引用消息中的图片
+            image_md5s = await self._get_message_images(event, message_id)
+            if not image_md5s:
+                yield event.plain_result("❌ 引用的消息中没有图片")
+                return
+
+            removed_count = 0
+            for md5_hash in image_md5s:
+                success = await self._db.remove_auto_whitelist(md5_hash)
+                if success:
+                    removed_count += 1
+
+            if removed_count > 0:
+                yield event.plain_result(f"✅ 成功从自动白名单移除 {removed_count} 张图片")
+            else:
+                yield event.plain_result("⚠️ 图片不在自动白名单中")
+
+        except Exception as e:
+            logger.error(f"移除自动白名单异常: {e}")
+            yield event.plain_result(f"❌ 操作失败: {str(e)}")
+
+    @filter.command("移除自动黑名单")
+    async def remove_auto_blacklist_cmd(self, event: AstrMessageEvent):
+        """从自动黑名单移除图片（管理群专用，需引用图片）"""
+        try:
+            manage_group_id = str(event.get_group_id()) if event.get_group_id() else None
+            if not manage_group_id:
+                return
+
+            if not self._is_manage_group(manage_group_id):
+                return
+
+            # 检查是否引用了消息
+            reply_info = self._extract_reply_info(event)
+            if not reply_info:
+                yield event.plain_result("❌ 请引用需要移除的图片消息")
+                return
+
+            message_id = reply_info.get("message_id")
+            if not message_id:
+                yield event.plain_result("❌ 无法获取引用消息ID")
+                return
+
+            # 获取被引用消息中的图片
+            image_md5s = await self._get_message_images(event, message_id)
+            if not image_md5s:
+                yield event.plain_result("❌ 引用的消息中没有图片")
+                return
+
+            removed_count = 0
+            for md5_hash in image_md5s:
+                success = await self._db.remove_auto_blacklist(md5_hash)
+                if success:
+                    removed_count += 1
+
+            if removed_count > 0:
+                yield event.plain_result(f"✅ 成功从自动黑名单移除 {removed_count} 张图片")
+            else:
+                yield event.plain_result("⚠️ 图片不在自动黑名单中")
+
+        except Exception as e:
+            logger.error(f"移除自动黑名单异常: {e}")
+            yield event.plain_result(f"❌ 操作失败: {str(e)}")

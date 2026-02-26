@@ -3,12 +3,12 @@
 用于管理黑白名单、违规记录等数据的持久化存储
 """
 
-import aiosqlite
 import hashlib
 import os
 from datetime import datetime, timedelta
-from typing import Optional
 from enum import Enum
+
+import aiosqlite
 
 
 class RiskLevel(Enum):
@@ -39,7 +39,7 @@ class DatabaseManager:
         if self._initialized:
             logger.debug("数据库已初始化，跳过")
             return
-        
+
         logger.debug(f"开始初始化数据库，路径: {self._db_path}")
         os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
         logger.debug("数据库目录创建完成")
@@ -70,6 +70,32 @@ class DatabaseManager:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     expires_at TIMESTAMP,
                     hit_count INTEGER DEFAULT 0
+                )
+            """)
+
+            # 人工白名单表
+            logger.debug("创建人工白名单表")
+            await cursor.execute("""
+                CREATE TABLE IF NOT EXISTS manual_whitelist (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    md5_hash TEXT UNIQUE NOT NULL,
+                    added_by TEXT,
+                    reason TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            # 人工黑名单表
+            logger.debug("创建人工黑名单表")
+            await cursor.execute("""
+                CREATE TABLE IF NOT EXISTS manual_blacklist (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    md5_hash TEXT UNIQUE NOT NULL,
+                    risk_level INTEGER NOT NULL,
+                    risk_reason TEXT,
+                    added_by TEXT,
+                    reason TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
 
@@ -170,7 +196,7 @@ class DatabaseManager:
         logger = logging.getLogger(__name__)
         logger.debug(f"检查白名单，MD5: {md5_hash}")
         await self._init_db()
-        
+
         async with aiosqlite.connect(self._db_path) as conn:
             cursor = await conn.cursor()
             await cursor.execute(
@@ -205,7 +231,7 @@ class DatabaseManager:
             logger.debug(f"白名单检查通过，MD5: {md5_hash}")
             return True
 
-    async def check_blacklist(self, md5_hash: str) -> Optional[tuple[RiskLevel, str]]:
+    async def check_blacklist(self, md5_hash: str) -> tuple[RiskLevel, str] | None:
         """
         检查MD5是否在黑名单中
 
@@ -219,7 +245,7 @@ class DatabaseManager:
         logger = logging.getLogger(__name__)
         logger.debug(f"检查黑名单，MD5: {md5_hash}")
         await self._init_db()
-        
+
         async with aiosqlite.connect(self._db_path) as conn:
             cursor = await conn.cursor()
             await cursor.execute(
@@ -275,7 +301,7 @@ class DatabaseManager:
         logger = logging.getLogger(__name__)
         logger.debug(f"添加到白名单，MD5: {md5_hash}")
         await self._init_db()
-        
+
         async with aiosqlite.connect(self._db_path) as conn:
             cursor = await conn.cursor()
 
@@ -290,9 +316,9 @@ class DatabaseManager:
                 # 已存在，延长过期时间
                 hit_count = result[0]
                 logger.debug(f"白名单中已存在，命中次数: {hit_count}")
-                # 每次命中翻倍过期时间
+                # 每次命中增加50%过期时间，避免指数增长
                 expire_hours = min(
-                    base_expire_hours * (2 ** hit_count),
+                    int(base_expire_hours * (1.5 ** min(hit_count, 10))),  # 限制最大10次翻倍
                     max_expire_days * 24
                 )
                 logger.debug(f"延长过期时间: {expire_hours}小时")
@@ -333,7 +359,7 @@ class DatabaseManager:
         logger = logging.getLogger(__name__)
         logger.debug(f"添加到黑名单，MD5: {md5_hash}, 风险等级: {risk_level.name}, 原因: {risk_reason}")
         await self._init_db()
-        
+
         async with aiosqlite.connect(self._db_path) as conn:
             cursor = await conn.cursor()
 
@@ -348,8 +374,9 @@ class DatabaseManager:
                 # 已存在，延长过期时间
                 hit_count = result[0]
                 logger.debug(f"黑名单中已存在，命中次数: {hit_count}")
+                # 每次命中增加50%过期时间，避免指数增长
                 expire_hours = min(
-                    base_expire_hours * (2 ** hit_count),
+                    int(base_expire_hours * (1.5 ** min(hit_count, 10))),  # 限制最大10次翻倍
                     max_expire_days * 24
                 )
                 logger.debug(f"延长过期时间: {expire_hours}小时")
@@ -374,11 +401,11 @@ class DatabaseManager:
         user_id: str,
         group_id: str,
         md5_hash: str,
-        image_url: Optional[str],
+        image_url: str | None,
         risk_level: RiskLevel,
         risk_reason: str,
-        mute_duration: Optional[int] = None,
-        message_id: Optional[str] = None
+        mute_duration: int | None = None,
+        message_id: str | None = None
     ):
         """
         记录违规信息
@@ -397,7 +424,7 @@ class DatabaseManager:
         logger = logging.getLogger(__name__)
         logger.debug(f"记录违规信息，用户: {user_id}, 群: {group_id}, 风险等级: {risk_level.name}")
         await self._init_db()
-        
+
         async with aiosqlite.connect(self._db_path) as conn:
             cursor = await conn.cursor()
 
@@ -439,7 +466,7 @@ class DatabaseManager:
             违规次数
         """
         await self._init_db()
-        
+
         async with aiosqlite.connect(self._db_path) as conn:
             cursor = await conn.cursor()
             await cursor.execute(
@@ -452,7 +479,7 @@ class DatabaseManager:
     async def get_user_violation_records(
         self,
         user_id: str,
-        group_id: Optional[str] = None,
+        group_id: str | None = None,
         limit: int = 50
     ) -> list[dict]:
         """
@@ -467,7 +494,7 @@ class DatabaseManager:
             违规记录列表
         """
         await self._init_db()
-        
+
         async with aiosqlite.connect(self._db_path) as conn:
             conn.row_factory = aiosqlite.Row
             cursor = await conn.cursor()
@@ -493,7 +520,7 @@ class DatabaseManager:
     async def delete_user_violations(
         self,
         user_id: str,
-        group_id: Optional[str] = None
+        group_id: str | None = None
     ) -> int:
         """
         删除用户违规记录
@@ -506,7 +533,7 @@ class DatabaseManager:
             删除的记录数量
         """
         await self._init_db()
-        
+
         async with aiosqlite.connect(self._db_path) as conn:
             cursor = await conn.cursor()
 
@@ -528,7 +555,7 @@ class DatabaseManager:
                     "DELETE FROM user_violation_stats WHERE user_id = ?",
                     (user_id,)
                 )
-            
+
             await conn.commit()
             return cursor.rowcount
 
@@ -540,7 +567,7 @@ class DatabaseManager:
         user_name: str,
         message_content: str,
         message_type: str = "text",
-        image_url: Optional[str] = None
+        image_url: str | None = None
     ):
         """
         缓存消息用于违规时转发
@@ -555,7 +582,7 @@ class DatabaseManager:
             image_url: 图片URL
         """
         await self._init_db()
-        
+
         async with aiosqlite.connect(self._db_path) as conn:
             cursor = await conn.cursor()
             await cursor.execute(
@@ -582,7 +609,7 @@ class DatabaseManager:
             消息列表
         """
         await self._init_db()
-        
+
         async with aiosqlite.connect(self._db_path) as conn:
             conn.row_factory = aiosqlite.Row
             cursor = await conn.cursor()
@@ -603,7 +630,7 @@ class DatabaseManager:
             max_age_hours: 最大缓存时间（小时）
         """
         await self._init_db()
-        
+
         async with aiosqlite.connect(self._db_path) as conn:
             cursor = await conn.cursor()
             cutoff_time = (datetime.now() - timedelta(hours=max_age_hours)).isoformat()
@@ -616,7 +643,7 @@ class DatabaseManager:
     async def clean_expired_list_entries(self):
         """清理过期的黑白名单条目"""
         await self._init_db()
-        
+
         async with aiosqlite.connect(self._db_path) as conn:
             cursor = await conn.cursor()
             now = datetime.now().isoformat()
@@ -627,20 +654,199 @@ class DatabaseManager:
     async def clear_all_cache(self) -> dict:
         """清除所有缓存数据（黑白名单）"""
         await self._init_db()
-        
+
         async with aiosqlite.connect(self._db_path) as conn:
             cursor = await conn.cursor()
-            
+
             await cursor.execute("SELECT COUNT(*) FROM whitelist")
             whitelist_count = (await cursor.fetchone())[0]
             await cursor.execute("SELECT COUNT(*) FROM blacklist")
             blacklist_count = (await cursor.fetchone())[0]
-            
+
             await cursor.execute("DELETE FROM whitelist")
             await cursor.execute("DELETE FROM blacklist")
             await conn.commit()
-            
+
             return {
                 "whitelist": whitelist_count,
                 "blacklist": blacklist_count
             }
+
+    # ========== 人工白名单管理 ==========
+
+    async def check_manual_whitelist(self, md5_hash: str) -> bool:
+        """检查MD5是否在人工白名单中"""
+        await self._init_db()
+
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute(
+                "SELECT id FROM manual_whitelist WHERE md5_hash = ?",
+                (md5_hash,)
+            )
+            result = await cursor.fetchone()
+            return result is not None
+
+    async def add_manual_whitelist(self, md5_hash: str, added_by: str = None, reason: str = None) -> bool:
+        """添加到人工白名单"""
+        await self._init_db()
+
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+            try:
+                await cursor.execute(
+                    "INSERT INTO manual_whitelist (md5_hash, added_by, reason) VALUES (?, ?, ?)",
+                    (md5_hash, added_by, reason)
+                )
+                await conn.commit()
+                return True
+            except aiosqlite.IntegrityError:
+                return False
+
+    async def remove_manual_whitelist(self, md5_hash: str) -> bool:
+        """从人工白名单移除"""
+        await self._init_db()
+
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute(
+                "DELETE FROM manual_whitelist WHERE md5_hash = ?",
+                (md5_hash,)
+            )
+            await conn.commit()
+            return cursor.rowcount > 0
+
+    async def clear_all_manual_whitelist(self) -> int:
+        """清空人工白名单"""
+        await self._init_db()
+
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute("SELECT COUNT(*) FROM manual_whitelist")
+            count = (await cursor.fetchone())[0]
+            await cursor.execute("DELETE FROM manual_whitelist")
+            await conn.commit()
+            return count
+
+    async def get_manual_whitelist(self, limit: int = 50) -> list[dict]:
+        """获取人工白名单列表"""
+        await self._init_db()
+
+        async with aiosqlite.connect(self._db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.cursor()
+            await cursor.execute(
+                "SELECT * FROM manual_whitelist ORDER BY created_at DESC LIMIT ?",
+                (limit,)
+            )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    # ========== 人工黑名单管理 ==========
+
+    async def check_manual_blacklist(self, md5_hash: str) -> tuple[RiskLevel, str] | None:
+        """检查MD5是否在人工黑名单中"""
+        await self._init_db()
+
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute(
+                "SELECT risk_level, risk_reason FROM manual_blacklist WHERE md5_hash = ?",
+                (md5_hash,)
+            )
+            result = await cursor.fetchone()
+            if result:
+                return RiskLevel(result[0]), result[1] or ""
+            return None
+
+    async def add_manual_blacklist(
+        self,
+        md5_hash: str,
+        risk_level: RiskLevel,
+        risk_reason: str,
+        added_by: str = None,
+        reason: str = None
+    ) -> bool:
+        """添加到人工黑名单"""
+        await self._init_db()
+
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+            try:
+                await cursor.execute(
+                    """INSERT INTO manual_blacklist
+                       (md5_hash, risk_level, risk_reason, added_by, reason)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (md5_hash, risk_level.value, risk_reason, added_by, reason)
+                )
+                await conn.commit()
+                return True
+            except aiosqlite.IntegrityError:
+                return False
+
+    async def remove_manual_blacklist(self, md5_hash: str) -> bool:
+        """从人工黑名单移除"""
+        await self._init_db()
+
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute(
+                "DELETE FROM manual_blacklist WHERE md5_hash = ?",
+                (md5_hash,)
+            )
+            await conn.commit()
+            return cursor.rowcount > 0
+
+    async def clear_all_manual_blacklist(self) -> int:
+        """清空人工黑名单"""
+        await self._init_db()
+
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute("SELECT COUNT(*) FROM manual_blacklist")
+            count = (await cursor.fetchone())[0]
+            await cursor.execute("DELETE FROM manual_blacklist")
+            await conn.commit()
+            return count
+
+    async def get_manual_blacklist(self, limit: int = 50) -> list[dict]:
+        """获取人工黑名单列表"""
+        await self._init_db()
+
+        async with aiosqlite.connect(self._db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.cursor()
+            await cursor.execute(
+                "SELECT * FROM manual_blacklist ORDER BY created_at DESC LIMIT ?",
+                (limit,)
+            )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    # ========== 自动黑白名单管理 ==========
+
+    async def remove_auto_whitelist(self, md5_hash: str) -> bool:
+        """从自动白名单移除"""
+        await self._init_db()
+
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute(
+                "DELETE FROM whitelist WHERE md5_hash = ?",
+                (md5_hash,)
+            )
+            await conn.commit()
+            return cursor.rowcount > 0
+
+    async def remove_auto_blacklist(self, md5_hash: str) -> bool:
+        """从自动黑名单移除"""
+        await self._init_db()
+
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute(
+                "DELETE FROM blacklist WHERE md5_hash = ?",
+                (md5_hash,)
+            )
+            await conn.commit()
+            return cursor.rowcount > 0
