@@ -3,16 +3,25 @@
 图片审核插件 / An image review plugin for AstrBot
 
 [![License](https://img.shields.io/github/license/AnteriorTAg127/astrbot_plugin_image_review)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v1.0.4-blue)](metadata.yaml)
+[![Version](https://img.shields.io/badge/version-v1.1.4-blue)](metadata.yaml)
 
 > [!NOTE]
 > 这是一个为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 提供图片内容审核功能的插件。
 >
 > [AstrBot](https://github.com/AstrBotDevs/AstrBot) 是一个支持多个主流即时通讯平台的智能助手，包括 QQ、Telegram、飞书、钉钉、Slack、Discord 等。本插件为 AstrBot 提供图片内容审核能力，帮助群管理员过滤不当图片内容。
 
+## 更新日志
+
+### v1.1.4
+
+- **新增动图增强检测** - 支持对 GIF/动图进行多帧检测，可配置逐帧分开检查或批量合并检查模式
+- **新增 QQ 自带表情包跳过** - 可配置跳过 QQ 官方表情包检测，避免误审
+- **新增动图检测专用配置** - 支持单独配置动图检测的 LLM 提供商、采样帧数、检测模式等
+
 ## 功能特性
 
 - **双模式图片审核** - 支持阿里云内容安全 API 和 VLAI 视觉语言模型两种审核方式
+- **动图增强检测** - 对多帧图片(GIF/动图)进行增强检测，抽取多帧进行审核
 - **智能缓存机制** - 通过 MD5 缓存已审核图片，重复图片无需再次审核
 - **黑白名单系统** - 支持自动黑白名单和人工黑白名单，可灵活管理
 - **违规处理** - 自动撤回违规图片并禁言用户
@@ -73,8 +82,10 @@ VLAI 使用 AstrBot 已配置的 LLM 提供商进行图片审核：
 
 ```json
 {
-  "image_censor_provider": "Aliyun",
+  "image_censor_provider": "VLAI",
   "enable_image_censor": true,
+  "enable_gif_enhanced_detection": true,
+  "skip_qq_builtin_emoji": true,
   "disable_auto_whitelist": false,
   "disable_auto_blacklist": false,
   "aliyun": {
@@ -85,7 +96,16 @@ VLAI 使用 AstrBot 已配置的 LLM 提供商进行图片审核：
   },
   "vlai": {
     "provider_id": "",
+    "max_image_size": 640,
     "censor_prompt": "请分析这张图片是否有显著色情违规内容..."
+  },
+  "gif_enhanced": {
+    "provider_id": "",
+    "max_image_size": 640,
+    "frame_sample_count": 3,
+    "detection_mode": "separate",
+    "censor_prompt": "请分析这张图片是否有显著色情违规内容...",
+    "batch_censor_prompt": "我将发送给你多张图片，这些是同一张动图的不同帧..."
   },
   "group_settings": [
     {
@@ -112,6 +132,8 @@ VLAI 使用 AstrBot 已配置的 LLM 提供商进行图片审核：
 |------|------|------|--------|
 | `image_censor_provider` | string | 图片审核提供商 (`Aliyun` 或 `VLAI`) | `Aliyun` |
 | `enable_image_censor` | bool | 是否启用图片审核 | `true` |
+| `enable_gif_enhanced_detection` | bool | 是否启用动图增强检测 | `false` |
+| `skip_qq_builtin_emoji` | bool | 是否跳过QQ自带表情包 | `true` |
 | `disable_auto_whitelist` | bool | 关闭自动白名单机制 | `false` |
 | `disable_auto_blacklist` | bool | 关闭自动黑名单机制 | `false` |
 
@@ -129,7 +151,19 @@ VLAI 使用 AstrBot 已配置的 LLM 提供商进行图片审核：
 | 参数 | 类型 | 说明 | 默认值 |
 |------|------|------|--------|
 | `vlai.provider_id` | string | LLM 提供商 ID（留空使用默认） | `""` |
+| `vlai.max_image_size` | int | 图片缩放最大边长(像素)，0表示不缩放 | `640` |
 | `vlai.censor_prompt` | text | 图片审核提示词 | 见默认提示词 |
+
+#### 动图增强检测配置
+
+| 参数 | 类型 | 说明 | 默认值 |
+|------|------|------|--------|
+| `gif_enhanced.provider_id` | string | 动图检测专用 LLM 提供商 ID | `""` |
+| `gif_enhanced.max_image_size` | int | 动图帧缩放最大边长(像素) | `640` |
+| `gif_enhanced.frame_sample_count` | int | 采样帧数，建议3-5帧 | `3` |
+| `gif_enhanced.detection_mode` | string | 检测模式 (`separate`逐帧/`batch`批量) | `separate` |
+| `gif_enhanced.censor_prompt` | text | 逐帧检查模式提示词 | 见默认提示词 |
+| `gif_enhanced.batch_censor_prompt` | text | 批量检查模式提示词 | 见默认提示词 |
 
 #### 群聊配置
 

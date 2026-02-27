@@ -1,6 +1,6 @@
 """
 图片审核流程管理模块
-整合MD5检测、黑白名单、API审核、违规处理等完整流程
+整合MD5检测、黑白名单、API审核、动图检测、违规处理等完整流程
 """
 
 import asyncio
@@ -15,6 +15,7 @@ from .censor_aliyun import AliyunCensor
 from .censor_base import CensorBase, CensorError
 from .censor_vlai import VLAICensor
 from .database import DatabaseManager, RiskLevel
+from .gif_censor import GIFCensor
 
 # 单例会话管理
 _download_session = None
@@ -151,6 +152,7 @@ class CensorFlow:
         self._db = db_manager
         self._context = context
         self._image_censor: CensorBase | None = None
+        self._gif_censor: GIFCensor | None = None
 
         # 缓存配置 - 使用全局默认值，实际值从群配置中获取
         self._base_expire_hours = 2
@@ -198,6 +200,14 @@ class CensorFlow:
                 logger.error("VLAI 审核器需要 AstrBot 上下文对象，但未提供")
         else:
             logger.debug(f"未知的审核提供商: {image_provider}")
+
+        # 初始化动图检测器（如果启用）
+        if self._config.get("enable_gif_enhanced_detection", False) and self._context:
+            logger.debug("开始初始化动图增强检测器")
+            gif_config = self._config.get("gif_enhanced", {})
+            logger.debug(f"动图检测配置: {gif_config}")
+            self._gif_censor = GIFCensor(gif_config, self._context, self._image_censor)
+            logger.debug("动图增强检测器初始化完成")
 
     async def close(self):
         """关闭资源"""
@@ -317,7 +327,45 @@ class CensorFlow:
                 f"API审核完成，风险等级: {risk_level.name}, 原因: {risk_reason}"
             )
 
-            # 6. 根据审核结果更新自动黑白名单（如果未关闭）
+            # 6. 动图增强检测（如果启用且是普通图片审核通过的情况）
+            # 只对 VLAI 提供商启用动图增强检测（阿里云不支持动图多帧检测）
+            if (
+                self._config.get("enable_gif_enhanced_detection", False)
+                and self._gif_censor
+                and self._config.get("image_censor_provider") == "VLAI"
+                and risk_level == RiskLevel.Pass
+            ):
+                logger.debug("开始动图增强检测")
+                try:
+                    # 下载图片数据用于动图检测
+                    image_data = await download_image(image_url)
+
+                    # 检测是否为动图
+                    is_animated, frame_count = GIFCensor.is_animated_image(image_data)
+
+                    if is_animated and frame_count > 1:
+                        logger.info(
+                            f"检测到多帧动图，帧数: {frame_count}，启动增强检测"
+                        )
+                        (
+                            gif_risk_level,
+                            gif_risk_reason,
+                        ) = await self._gif_censor.detect_animated_image(image_data)
+
+                        if gif_risk_level in (RiskLevel.Review, RiskLevel.Block):
+                            logger.warning(f"动图增强检测到违规: {gif_risk_reason}")
+                            risk_level = gif_risk_level
+                            risk_reason = f"动图检测: {gif_risk_reason}"
+                        else:
+                            logger.debug("动图增强检测通过")
+                    else:
+                        logger.debug("图片不是动图或只有单帧，跳过动图增强检测")
+
+                except Exception as e:
+                    logger.error(f"动图增强检测异常: {e}")
+                    # 动图检测异常不影响主流程，继续返回原结果
+
+            # 7. 根据审核结果更新自动黑白名单（如果未关闭）
             if risk_level == RiskLevel.Pass:
                 if not disable_auto_whitelist:
                     logger.debug(f"图片审核通过，添加到自动白名单: {md5_hash}")

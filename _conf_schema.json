@@ -12,6 +12,18 @@
         "hint": "开启后将对图片进行内容审核",
         "default": true
     },
+    "enable_gif_enhanced_detection": {
+        "type": "bool",
+        "description": "是否启用动图增强检测",
+        "hint": "开启后会对多帧图片(GIF/动图)进行增强检测，抽取多帧进行审核",
+        "default": false
+    },
+    "skip_qq_builtin_emoji": {
+        "type": "bool",
+        "description": "是否跳过QQ自带表情包",
+        "hint": "开启后将不对QQ官方表情包(如gxh.vip.qq.com域名下的表情)进行检测",
+        "default": true
+    },
     "disable_auto_whitelist": {
         "type": "bool",
         "description": "关闭自动白名单",
@@ -41,7 +53,7 @@
             "image_service": {
                 "type": "string",
                 "description": "图片审核服务类型",
-                "hint": "可选: baselineCheck, chat_detection_pro",
+                "hint": "官网查询可选列表",
                 "default": "baselineCheck"
             },
             "image_info_type": {
@@ -73,6 +85,55 @@
                 "description": "图片审核提示词",
                 "hint": "用于指导 AI 审核图片内容的提示词，可自定义审核标准和输出格式",
                 "default": "请分析这张图片是否有显著色情违规内容（性暗示动作，如：露出、叉腿、跪趴，性行为、透明雨衣、性玩具。\n\n在对应语境下的包含「射精」及其同音词文本的。\n请严格按照以下格式回复（只回复这一行）：\n结果: [正常/违规] | 原因: [简要描述]\n\n如果图片正常，回复: 结果: 正常 | 原因: 无\n如果图片违规，回复: 结果: 违规 | 原因: [具体违规类型]",
+                "editor_mode": true,
+                "editor_language": "text",
+                "editor_theme": "vs-light"
+            }
+        }
+    },
+    "gif_enhanced": {
+        "type": "object",
+        "description": "动图增强检测配置",
+        "items": {
+            "provider_id": {
+                "type": "string",
+                "description": "动图检测专用 LLM 提供商 ID",
+                "hint": "可选，指定专门用于动图多帧检测的 LLM 提供商 ID，留空则使用默认提供商。建议单独配置一个VL模型以防止并发问题",
+                "default": ""
+            },
+            "max_image_size": {
+                "type": "int",
+                "description": "动图帧缩放最大边长(像素)",
+                "hint": "动图每帧超过此尺寸时将自动缩放，0表示不缩放，建议640以内以节省token和提高响应速度",
+                "default": 640
+            },
+            "frame_sample_count": {
+                "type": "int",
+                "description": "采样帧数",
+                "hint": "从动图中均匀抽取的帧数进行检测，建议3-5帧",
+                "default": 3
+            },
+            "detection_mode": {
+                "type": "string",
+                "description": "动图检测模式",
+                "hint": "separate=逐帧分开检查（多次调用模型，更精确）; batch=多帧合并检查（单次调用模型，更省token）",
+                "default": "separate",
+                "options": ["separate", "batch"]
+            },
+            "censor_prompt": {
+                "type": "text",
+                "description": "动图帧审核提示词（分开检查模式）",
+                "hint": "用于指导 AI 审核单张动图帧内容的提示词",
+                "default": "请分析这张图片是否有显著色情违规内容（性暗示动作，如：露出、叉腿、跪趴，性行为、透明雨衣、性玩具。\n\n在对应语境下的包含「射精」及其同音词文本的。\n请严格按照以下格式回复（只回复这一行）：\n结果: [正常/违规] | 原因: [简要描述]\n\n如果图片正常，回复: 结果: 正常 | 原因: 无\n如果图片违规，回复: 结果: 违规 | 原因: [具体违规类型]",
+                "editor_mode": true,
+                "editor_language": "text",
+                "editor_theme": "vs-light"
+            },
+            "batch_censor_prompt": {
+                "type": "text",
+                "description": "动图批量审核提示词（合并检查模式）",
+                "hint": "用于指导 AI 同时审核多张动图帧的提示词，模型会收到所有帧图片",
+                "default": "我将发送给你多张图片，这些是同一张动图的不同帧。请分析所有帧中是否有显著色情违规内容（性暗示动作，如：露出、叉腿、跪趴，性行为、透明雨衣、性玩具。\n\n在对应语境下的包含「射精」及其同音词文本的）。\n\n请对每张图片分别判断，并严格按照以下格式回复：\n帧1: 结果: [正常/违规] | 原因: [简要描述]\n帧2: 结果: [正常/违规] | 原因: [简要描述]\n...\n\n如果所有帧都正常，可以简写为: 所有帧正常\n如果有任何一帧违规，请分别列出违规帧",
                 "editor_mode": true,
                 "editor_language": "text",
                 "editor_theme": "vs-light"

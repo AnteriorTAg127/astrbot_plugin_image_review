@@ -57,7 +57,7 @@ def _sanitize_filename(filename: str) -> str:
     "image_review",
     "AnteriorTAg127",
     "图片审核插件，提供图片内容审核、违规处理、管理群通知等功能",
-    "1.0.4",
+    "1.1.0",
 )
 class ImageReviewPlugin(Star):
     """图片审核插件主类"""
@@ -366,6 +366,39 @@ class ImageReviewPlugin(Star):
         for config in self._group_config.values():
             if config["manage_group_id"] == group_id:
                 return True
+        return False
+
+    def _is_qq_builtin_emoji(self, image_url: str) -> bool:
+        """
+        检查图片URL是否为QQ官方自带表情包
+
+        QQ官方表情包通常包含以下特征域名：
+        - gxh.vip.qq.com
+        - p.qpic.cn (QQ表情CDN)
+        - imgcache.qq.com
+
+        Args:
+            image_url: 图片URL
+
+        Returns:
+            是否为QQ官方表情包
+        """
+        if not image_url:
+            return False
+
+        # QQ官方表情包特征域名列表
+        qq_emoji_domains = [
+            "gxh.vip.qq.com",
+            "p.qpic.cn",
+            "imgcache.qq.com",
+            "qpic.cn",
+        ]
+
+        image_url_lower = image_url.lower()
+        for domain in qq_emoji_domains:
+            if domain in image_url_lower:
+                return True
+
         return False
 
     async def _is_user_admin(
@@ -871,10 +904,19 @@ class ImageReviewPlugin(Star):
             message_chain = event.get_messages()
             images_to_check = []
 
+            # 检查是否跳过QQ自带表情包
+            skip_qq_emoji = self._config.get("skip_qq_builtin_emoji", True)
+
             for comp in message_chain:
                 if isinstance(comp, Comp.Image):
                     image_url = comp.url
                     image_md5 = self._extract_image_md5(event, comp)
+
+                    # 跳过QQ官方表情包（如果开启此选项）
+                    if skip_qq_emoji and self._is_qq_builtin_emoji(image_url):
+                        logger.debug(f"检测到QQ官方表情包，跳过审核: {image_url}")
+                        continue
+
                     if image_url:
                         images_to_check.append((image_url, image_md5))
                         logger.debug(
@@ -1052,6 +1094,23 @@ class ImageReviewPlugin(Star):
                 provider_id = vlai_config.get("provider_id", "")
                 status_info += (
                     f"VLAI 提供商ID: {provider_id if provider_id else '默认'}\n"
+                )
+
+            # 显示动图增强检测配置
+            gif_enabled = self._config.get("enable_gif_enhanced_detection", False)
+            status_info += (
+                f"动图增强检测: {'✅ 已启用' if gif_enabled else '❌ 未启用'}\n"
+            )
+            if gif_enabled and image_provider == "VLAI":
+                gif_config = self._config.get("gif_enhanced", {})
+                gif_provider_id = gif_config.get("provider_id", "")
+                frame_count = gif_config.get("frame_sample_count", 3)
+                detection_mode = gif_config.get("detection_mode", "separate")
+                mode_str = "逐帧分开" if detection_mode == "separate" else "批量合并"
+                status_info += (
+                    f"  └ 动图检测提供商ID: {gif_provider_id if gif_provider_id else '默认'}\n"
+                    f"  └ 采样帧数: {frame_count}\n"
+                    f"  └ 检测模式: {mode_str}\n"
                 )
 
             # 检查群聊配置
@@ -1813,6 +1872,16 @@ class ImageReviewPlugin(Star):
                 "━━━━━━━━━━━━━━━\n"
                 "/移除自动白名单 - 移除自动白名单(需引用)\n"
                 "/移除自动黑名单 - 移除自动黑名单(需引用)\n"
+                "\n"
+                "【动图检测说明】\n"
+                "━━━━━━━━━━━━━━━\n"
+                "• 动图增强检测仅在使用 VLAI 提供商时生效\n"
+                "• 开启后会对多帧 GIF 图片进行采样检测\n"
+                "• 可单独配置动图检测的 VL 模型防止并发问题\n"
+                "• 缩放处理会应用于每一采样帧\n"
+                "• 检测模式:\n"
+                "  - separate: 逐帧分开检查（多次调用，更精确）\n"
+                "  - batch: 多帧合并检查（单次调用，更省token）\n"
                 "\n"
                 "【说明】\n"
                 "━━━━━━━━━━━━━━━\n"
