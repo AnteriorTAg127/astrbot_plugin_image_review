@@ -8,7 +8,6 @@ import math
 import os
 import re
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 import aiofiles
@@ -58,7 +57,7 @@ def _sanitize_filename(filename: str) -> str:
     "image_review",
     "AnteriorTAg127",
     "图片审核插件，提供图片内容审核、违规处理、管理群通知等功能",
-    "1.0.3",
+    "1.0.4",
 )
 class ImageReviewPlugin(Star):
     """图片审核插件主类"""
@@ -831,35 +830,6 @@ class ImageReviewPlugin(Star):
                     result.append({"type": "image", "data": {"file": comp.url}})
         return result
 
-    def _get_bot_user_id(self, event: AstrMessageEvent) -> str | None:
-        """
-        获取机器人自身的用户ID
-
-        Args:
-            event: 消息事件
-
-        Returns:
-            机器人用户ID，无法获取则返回None
-        """
-        try:
-            platform_name = event.get_platform_name()
-            if platform_name == "aiocqhttp":
-                from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
-                    AiocqhttpMessageEvent,
-                )
-
-                if isinstance(event, AiocqhttpMessageEvent):
-                    # 从 bot 对象获取自身QQ号
-                    if hasattr(event, "bot") and hasattr(event.bot, "api"):
-                        # 尝试从登录信息获取
-                        login_info = event.bot.api._client._ws_response.get("self_id")
-                        if login_info:
-                            return str(login_info)
-            return None
-        except Exception as e:
-            logger.debug(f"获取机器人用户ID失败: {e}")
-            return None
-
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
         """
@@ -878,7 +848,7 @@ class ImageReviewPlugin(Star):
                 return
 
             # 检查是否是机器人自己发送的消息
-            bot_user_id = self._get_bot_user_id(event)
+            bot_user_id = str(event.get_self_id()) if event.get_self_id() else None
             if bot_user_id and user_id == bot_user_id:
                 logger.debug("消息来自机器人自身，跳过审核")
                 return
@@ -907,7 +877,9 @@ class ImageReviewPlugin(Star):
                     image_md5 = self._extract_image_md5(event, comp)
                     if image_url:
                         images_to_check.append((image_url, image_md5))
-                        logger.debug(f"检测到图片消息，URL: {image_url}, MD5: {image_md5}")
+                        logger.debug(
+                            f"检测到图片消息，URL: {image_url}, MD5: {image_md5}"
+                        )
 
             # 检查是否是图片消息且启用了图片审核
             if not images_to_check:
@@ -934,7 +906,11 @@ class ImageReviewPlugin(Star):
                 try:
                     # 进行图片审核
                     logger.debug(f"开始审核图片，URL: {image_url}")
-                    risk_level, risk_reason, md5_hash = await self._censor_flow.submit_image(
+                    (
+                        risk_level,
+                        risk_reason,
+                        md5_hash,
+                    ) = await self._censor_flow.submit_image(
                         image_url,
                         group_id,
                         precalculated_md5=image_md5,

@@ -1,6 +1,6 @@
 name: astrbot_plugin_image_review
 display_name: 图片审核插件
 desc: 提供图片内容审核功能的 AstrBot 插件。
-version: v1.0.3
+version: v1.0.4
 author: AnteriorTAg127
 repo: https://github.com/AnteriorTAg127/astrbot_plugin_image_review

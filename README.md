@@ -3,7 +3,7 @@
 图片审核插件 / An image review plugin for AstrBot
 
 [![License](https://img.shields.io/github/license/AnteriorTAg127/astrbot_plugin_image_review)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v1.0.3-blue)](metadata.yaml)
+[![Version](https://img.shields.io/badge/version-v1.0.4-blue)](metadata.yaml)
 
 > [!NOTE]
 > 这是一个为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 提供图片内容审核功能的插件。
