@@ -52,9 +52,9 @@ def _sanitize_filename(filename: str) -> str:
 
 @register(
     "image_review",
-    "AstrBot",
+    "AnteriorTAg127",
     "图片审核插件，提供图片内容审核、违规处理、管理群通知等功能",
-    "1.0.1",
+    "1.0.3",
 )
 class ImageReviewPlugin(Star):
     """图片审核插件主类"""
@@ -156,6 +156,7 @@ class ImageReviewPlugin(Star):
                     "max_mute_duration": max_mute_duration,
                     "mute_multiplier": mute_multiplier,
                     "auto_recall": setting.get("auto_recall", True),
+                    "auto_mute": setting.get("auto_mute", True),
                     "base_expire_hours": base_expire_hours,
                     "max_expire_days": max_expire_days,
                 }
@@ -409,6 +410,8 @@ class ImageReviewPlugin(Star):
                     0,  # 禁言时长为0
                     0,  # 违规次数为0
                     is_admin=True,  # 标记为管理员
+                    auto_recall=group_config.get("auto_recall", True),
+                    auto_mute=group_config.get("auto_mute", True),
                 )
                 logger.info(f"管理员违规通知已发送: 用户={user_id}, 群={group_id}")
                 return
@@ -430,9 +433,13 @@ class ImageReviewPlugin(Star):
             mute_duration = min(mute_duration, max_mute)
             logger.debug(f"计算禁言时长: {mute_duration}秒")
 
-            # 3. 执行禁言
-            logger.debug(f"执行禁言，用户={user_id}, 时长={mute_duration}秒")
-            await self._mute_user(event, group_id, user_id, mute_duration)
+            # 3. 执行禁言（如果开启自动禁言）
+            if group_config.get("auto_mute", True):
+                logger.debug(f"执行禁言，用户={user_id}, 时长={mute_duration}秒")
+                await self._mute_user(event, group_id, user_id, mute_duration)
+            else:
+                logger.debug("自动禁言已关闭，跳过禁言操作")
+                mute_duration = 0
 
             # 4. 记录违规
             logger.debug("记录违规到数据库")
@@ -464,6 +471,8 @@ class ImageReviewPlugin(Star):
                 risk_reason,
                 mute_duration,
                 violation_count,
+                auto_recall=group_config.get("auto_recall", True),
+                auto_mute=group_config.get("auto_mute", True),
             )
             logger.debug("管理群通知完成")
 
@@ -608,6 +617,8 @@ class ImageReviewPlugin(Star):
         mute_duration: int,
         violation_count: int,
         is_admin: bool = False,
+        auto_recall: bool = True,
+        auto_mute: bool = True,
     ):
         """
         通知管理群
@@ -644,15 +655,22 @@ class ImageReviewPlugin(Star):
             if is_admin:
                 action_str = "无（管理员/群主身份，不执行处罚）"
             else:
-                if mute_duration < 60:
-                    mute_str = f"{mute_duration}秒"
-                elif mute_duration < 3600:
-                    mute_str = f"{mute_duration // 60}分钟"
-                elif mute_duration < 86400:
-                    mute_str = f"{mute_duration // 3600}小时"
+                recall_str = "撤回图片" if auto_recall else "未开启撤回"
+                if auto_mute and mute_duration > 0:
+                    if mute_duration < 60:
+                        mute_str = f"{mute_duration}秒"
+                    elif mute_duration < 3600:
+                        mute_str = f"{mute_duration // 60}分钟"
+                    elif mute_duration < 86400:
+                        mute_str = f"{mute_duration // 3600}小时"
+                    else:
+                        mute_str = f"{mute_duration // 86400}天"
+                    mute_str = f"禁言{mute_str}"
+                elif auto_mute:
+                    mute_str = "禁言0秒"
                 else:
-                    mute_str = f"{mute_duration // 86400}天"
-                action_str = f"撤回图片+禁言{mute_str}"
+                    mute_str = "未开启禁言"
+                action_str = f"{recall_str}+{mute_str}"
             logger.debug(f"处理措施: {action_str}")
 
             # 构建违规信息（新格式）

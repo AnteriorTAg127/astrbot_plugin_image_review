@@ -42,6 +42,7 @@ class VLAICensor(CensorBase):
         super().__init__(config)
         self._context = context
         self._provider_id = config.get("provider_id", "")
+        self._max_image_size = config.get("max_image_size", 640)
         self._censor_prompt = config.get("censor_prompt", self.DEFAULT_CENSOR_PROMPT)
 
     async def initialize(self):
@@ -74,9 +75,9 @@ class VLAICensor(CensorBase):
             width, height = original_width, original_height
 
             # 尺寸调整
-            if width > 768 or height > 768:
-                short_side = min(width, height)
-                scale = 768 / short_side
+            if self._max_image_size > 0 and (width > self._max_image_size or height > self._max_image_size):
+                long_side = max(width, height)
+                scale = self._max_image_size / long_side
                 new_width = int(width * scale)
                 new_height = int(height * scale)
                 img = img.resize((new_width, new_height), Image.LANCZOS)

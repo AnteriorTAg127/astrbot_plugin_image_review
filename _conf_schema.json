@@ -62,6 +62,12 @@
                 "hint": "可选，指定使用的 LLM 提供商 ID，留空则使用默认提供商",
                 "default": ""
             },
+            "max_image_size": {
+                "type": "int",
+                "description": "图片缩放最大边长(像素)",
+                "hint": "图片超过此尺寸时将自动缩放，0表示不缩放，建议640以内以节省token和提高响应速度",
+                "default": 640
+            },
             "censor_prompt": {
                 "type": "text",
                 "description": "图片审核提示词",
@@ -117,6 +123,12 @@
                         "type": "bool",
                         "description": "自动撤回违规图片",
                         "hint": "检测到违规图片时是否自动撤回",
+                        "default": true
+                    },
+                    "auto_mute": {
+                        "type": "bool",
+                        "description": "自动禁言违规用户",
+                        "hint": "检测到违规图片时是否自动禁言违规用户",
                         "default": true
                     },
                     "base_expire_hours": {

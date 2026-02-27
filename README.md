@@ -2,7 +2,7 @@
 
 图片审核插件 / An image review plugin for AstrBot
 
-[![License](https://img.shields.io/github/license/AstrBotDevs/astrbot-plugin-image-review)](LICENSE)
+[![License](https://img.shields.io/github/license/AnteriorTAg127/astrbot_plugin_image_review)](LICENSE)
 [![Version](https://img.shields.io/badge/version-v1.0.0-blue)](metadata.yaml)
 
 > [!NOTE]
@@ -36,7 +36,7 @@
 
 ```bash
 # 克隆插件仓库
-git clone https://github.com/AstrBotDevs/astrbot-plugin-image-review.git
+git clone https://github.com/AnteriorTAg127/astrbot_plugin_image_review.git
 
 # 复制到 AstrBot 插件目录
 cp -r astrbot-plugin-image-review <astrbot_plugins_path>/
