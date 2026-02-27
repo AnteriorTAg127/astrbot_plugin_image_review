@@ -114,9 +114,9 @@
                         "default": 2419200
                     },
                     "mute_multiplier": {
-                        "type": "int",
+                        "type": "number",
                         "description": "禁言时长翻倍倍数",
-                        "hint": "多次违规时禁言时长的翻倍倍数",
+                        "hint": "多次违规时禁言时长的翻倍倍数，支持小数如1.5，实际禁言时长会向上取整到分钟",
                         "default": 2
                     },
                     "auto_recall": {

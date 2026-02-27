@@ -53,9 +53,9 @@ class AliyunCensor(CensorBase):
         if self._session:
             await self._session.close()
             self._session = None
-        # 关闭线程池 - 使用 wait=False 避免阻塞事件循环
+        # 关闭线程池 - 使用 wait=True 确保任务完成，避免资源泄露
         if self._executor:
-            self._executor.shutdown(wait=False)
+            self._executor.shutdown(wait=True)
             self._executor = None
 
     async def detect_text(self, text: str) -> tuple[RiskLevel, set[str]]:

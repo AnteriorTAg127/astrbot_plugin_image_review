@@ -75,7 +75,9 @@ class VLAICensor(CensorBase):
             width, height = original_width, original_height
 
             # 尺寸调整
-            if self._max_image_size > 0 and (width > self._max_image_size or height > self._max_image_size):
+            if self._max_image_size > 0 and (
+                width > self._max_image_size or height > self._max_image_size
+            ):
                 long_side = max(width, height)
                 scale = self._max_image_size / long_side
                 new_width = int(width * scale)

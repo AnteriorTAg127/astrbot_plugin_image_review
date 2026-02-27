@@ -3,7 +3,7 @@
 图片审核插件 / An image review plugin for AstrBot
 
 [![License](https://img.shields.io/github/license/AnteriorTAg127/astrbot_plugin_image_review)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v1.0.0-blue)](metadata.yaml)
+[![Version](https://img.shields.io/badge/version-v1.0.3-blue)](metadata.yaml)
 
 > [!NOTE]
 > 这是一个为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 提供图片内容审核功能的插件。
@@ -23,8 +23,6 @@
 ## 支持平台
 
 - [x] QQ (aiocqhttp)
-- [ ] Telegram (开发中)
-- [ ] 其他平台 (开发中)
 
 ## 安装说明
 
@@ -96,8 +94,9 @@ VLAI 使用 AstrBot 已配置的 LLM 提供商进行图片审核：
       "manage_group_id": "987654321",
       "first_mute_duration": 600,
       "max_mute_duration": 2419200,
-      "mute_multiplier": 2,
+      "mute_multiplier": 1.5,
       "auto_recall": true,
+      "auto_mute": true,
       "base_expire_hours": 2,
       "max_expire_days": 14
     }
@@ -141,8 +140,9 @@ VLAI 使用 AstrBot 已配置的 LLM 提供商进行图片审核：
 | `group_settings[].manage_group_id` | string | 管理群号（接收通知） | - |
 | `group_settings[].first_mute_duration` | int | 首次违规禁言时长（秒） | `600` (10分钟) |
 | `group_settings[].max_mute_duration` | int | 最大禁言时长（秒） | `2419200` (28天) |
-| `group_settings[].mute_multiplier` | int | 禁言时长倍增因子 | `2` |
+| `group_settings[].mute_multiplier` | number | 禁言时长倍增因子（支持小数如1.5） | `2` |
 | `group_settings[].auto_recall` | bool | 是否自动撤回违规图片 | `true` |
+| `group_settings[].auto_mute` | bool | 是否自动禁言违规用户 | `true` |
 | `group_settings[].base_expire_hours` | int | 缓存基础过期时间（小时） | `2` |
 | `group_settings[].max_expire_days` | int | 缓存最大过期时间（天） | `14` |
 
@@ -192,6 +192,8 @@ VLAI 使用 AstrBot 已配置的 LLM 提供商进行图片审核：
 首次违规禁言时长 = `first_mute_duration`
 
 第 N 次违规禁言时长 = `first_mute_duration` × `mute_multiplier`^(N-1)
+
+计算结果会**向上取整到分钟**（例如 15分36秒 → 16分钟）
 
 最大不超过 `max_mute_duration`
 

@@ -3,9 +3,12 @@
 提供图片内容审核、违规处理、管理群通知等功能
 """
 
+import asyncio
+import math
 import os
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import aiofiles
@@ -14,6 +17,7 @@ import astrbot.api.message_components as Comp
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
+from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
 from .censor_base import CensorError
 from .censor_flow import CensorFlow
@@ -70,8 +74,8 @@ class ImageReviewPlugin(Star):
         super().__init__(context)
         self._config = config
 
-        # 数据目录（使用AstrBot的data目录）
-        self._data_dir = os.path.join("data", "image_review")
+        # 数据目录（使用AstrBot规范的插件数据目录）
+        self._data_dir = os.path.join(get_astrbot_plugin_data_path(), "image_review")
         os.makedirs(self._data_dir, exist_ok=True)
         logger.debug(f"图片审核插件数据目录: {self._data_dir}")
 
@@ -91,6 +95,10 @@ class ImageReviewPlugin(Star):
 
         # 审核流程管理器（延迟初始化）
         self._censor_flow: CensorFlow | None = None
+
+        # 定时任务引用
+        self._cleanup_task: asyncio.Task | None = None
+
         logger.debug("图片审核插件初始化完成")
 
     def _load_group_config(self):
@@ -117,6 +125,21 @@ class ImageReviewPlugin(Star):
             manage_group_id = str(setting.get("manage_group_id", ""))
             if group_id and manage_group_id:
                 # 验证并规范化配置值，带异常处理
+                def safe_float(value, default, min_val=None, max_val=None):
+                    """安全地将值转换为浮点数"""
+                    try:
+                        result = float(value) if value is not None else default
+                        if min_val is not None:
+                            result = max(min_val, result)
+                        if max_val is not None:
+                            result = min(max_val, result)
+                        return result
+                    except (ValueError, TypeError):
+                        logger.warning(
+                            f"配置值 '{value}' 无法转换为浮点数，使用默认值 {default}"
+                        )
+                        return default
+
                 def safe_int(value, default, min_val=None, max_val=None):
                     """安全地将值转换为整数"""
                     try:
@@ -141,7 +164,9 @@ class ImageReviewPlugin(Star):
                     min_val=0,
                     max_val=2419200,
                 )
-                mute_multiplier = safe_int(setting.get("mute_multiplier"), 2, min_val=1)
+                mute_multiplier = safe_float(
+                    setting.get("mute_multiplier"), 2, min_val=1
+                )
                 base_expire_hours = safe_int(
                     setting.get("base_expire_hours"), 2, min_val=1
                 )
@@ -179,13 +204,43 @@ class ImageReviewPlugin(Star):
                 logger.info("图片审核插件初始化成功，已启用图片审核")
             else:
                 logger.warning("图片审核插件初始化完成，但未启用图片审核（请检查配置）")
+
+            # 启动定时清理任务（每天执行一次）
+            self._cleanup_task = asyncio.create_task(self._cleanup_expired_entries())
+            logger.debug("定时清理任务已启动")
         except Exception as e:
             logger.error(f"图片审核插件初始化失败: {e}")
             logger.debug(f"初始化失败详情: {str(e)}")
 
+    async def _cleanup_expired_entries(self):
+        """定时清理过期的黑白名单条目"""
+        while True:
+            try:
+                # 每天执行一次清理
+                await asyncio.sleep(24 * 60 * 60)  # 24小时
+                logger.debug("开始执行定时清理过期黑白名单")
+                await self._db.clean_expired_list_entries()
+                logger.debug("定时清理过期黑白名单完成")
+            except asyncio.CancelledError:
+                logger.debug("定时清理任务被取消")
+                break
+            except Exception as e:
+                logger.error(f"定时清理过期黑白名单异常: {e}")
+                # 发生异常后等待1小时再重试
+                await asyncio.sleep(60 * 60)
+
     async def terminate(self):
         """插件销毁"""
         logger.debug("开始卸载图片审核插件")
+        # 取消定时清理任务
+        if self._cleanup_task:
+            logger.debug("取消定时清理任务")
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
+            logger.debug("定时清理任务已取消")
         if self._censor_flow:
             logger.debug("关闭审核流程管理器")
             await self._censor_flow.close()
@@ -217,20 +272,21 @@ class ImageReviewPlugin(Star):
         config = self._group_config.get(group_id)
         return config["manage_group_id"] if config else None
 
-    def _get_group_id_by_manage_group(self, manage_group_id: str) -> str | None:
+    def _get_group_ids_by_manage_group(self, manage_group_id: str) -> list[str]:
         """
-        根据管理群ID反向查找主群ID
+        根据管理群ID反向查找所有关联的主群ID列表
 
         Args:
             manage_group_id: 管理群ID
 
         Returns:
-            主群ID，未找到则返回None
+            主群ID列表，未找到则返回空列表
         """
+        group_ids = []
         for group_id, config in self._group_config.items():
             if config.get("manage_group_id") == manage_group_id:
-                return group_id
-        return None
+                group_ids.append(group_id)
+        return group_ids
 
     @staticmethod
     def _is_valid_md5(md5_hex: str) -> bool:
@@ -429,9 +485,11 @@ class ImageReviewPlugin(Star):
             first_mute = group_config.get("first_mute_duration", 600)
             multiplier = group_config.get("mute_multiplier", 2)
             max_mute = group_config.get("max_mute_duration", 2419200)
-            mute_duration = first_mute * (multiplier**violation_count)
+            raw_duration = first_mute * (multiplier**violation_count)
+            minutes = math.ceil(raw_duration / 60)
+            mute_duration = minutes * 60
             mute_duration = min(mute_duration, max_mute)
-            logger.debug(f"计算禁言时长: {mute_duration}秒")
+            logger.debug(f"计算禁言时长: {mute_duration}秒 ({minutes}分钟)")
 
             # 3. 执行禁言（如果开启自动禁言）
             if group_config.get("auto_mute", True):
@@ -773,6 +831,35 @@ class ImageReviewPlugin(Star):
                     result.append({"type": "image", "data": {"file": comp.url}})
         return result
 
+    def _get_bot_user_id(self, event: AstrMessageEvent) -> str | None:
+        """
+        获取机器人自身的用户ID
+
+        Args:
+            event: 消息事件
+
+        Returns:
+            机器人用户ID，无法获取则返回None
+        """
+        try:
+            platform_name = event.get_platform_name()
+            if platform_name == "aiocqhttp":
+                from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
+                    AiocqhttpMessageEvent,
+                )
+
+                if isinstance(event, AiocqhttpMessageEvent):
+                    # 从 bot 对象获取自身QQ号
+                    if hasattr(event, "bot") and hasattr(event.bot, "api"):
+                        # 尝试从登录信息获取
+                        login_info = event.bot.api._client._ws_response.get("self_id")
+                        if login_info:
+                            return str(login_info)
+            return None
+        except Exception as e:
+            logger.debug(f"获取机器人用户ID失败: {e}")
+            return None
+
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
         """
@@ -790,6 +877,12 @@ class ImageReviewPlugin(Star):
                 logger.debug("非群消息，跳过处理")
                 return
 
+            # 检查是否是机器人自己发送的消息
+            bot_user_id = self._get_bot_user_id(event)
+            if bot_user_id and user_id == bot_user_id:
+                logger.debug("消息来自机器人自身，跳过审核")
+                return
+
             # 缓存消息（用于违规时转发上下文）
             message_id = (
                 str(event.message_obj.message_id)
@@ -799,25 +892,25 @@ class ImageReviewPlugin(Star):
             message_str = event.message_str
             logger.debug(f"消息ID: {message_id}, 消息内容: {message_str[:50]}...")
 
-            # 检查是否是图片消息
-            message_chain = event.get_messages()
-            image_url = None
-            image_md5 = None
-
-            for comp in message_chain:
-                if isinstance(comp, Comp.Image):
-                    image_url = comp.url
-                    image_md5 = self._extract_image_md5(event, comp)
-                    logger.debug(f"检测到图片消息，URL: {image_url}, MD5: {image_md5}")
-                    break
-
             # 检查是否启用了图片审核
             if not self._is_group_enabled(group_id):
                 logger.debug(f"群 {group_id} 未启用图片审核，跳过")
                 return
 
+            # 检查是否是图片消息
+            message_chain = event.get_messages()
+            images_to_check = []
+
+            for comp in message_chain:
+                if isinstance(comp, Comp.Image):
+                    image_url = comp.url
+                    image_md5 = self._extract_image_md5(event, comp)
+                    if image_url:
+                        images_to_check.append((image_url, image_md5))
+                        logger.debug(f"检测到图片消息，URL: {image_url}, MD5: {image_md5}")
+
             # 检查是否是图片消息且启用了图片审核
-            if not image_url:
+            if not images_to_check:
                 logger.debug("非图片消息，跳过审核")
                 return
             if not self._censor_flow:
@@ -836,36 +929,45 @@ class ImageReviewPlugin(Star):
                 group_config.get("max_expire_days", 14) if group_config else 14
             )
 
-            # 进行图片审核
-            logger.debug(f"开始审核图片，URL: {image_url}")
-            risk_level, risk_reason, md5_hash = await self._censor_flow.submit_image(
-                image_url,
-                group_id,
-                precalculated_md5=image_md5,
-                base_expire_hours=base_expire_hours,
-                max_expire_days=max_expire_days,
-            )
-            logger.debug(
-                f"图片审核完成，结果: 风险等级={risk_level.name}, 原因={risk_reason}, MD5={md5_hash}"
-            )
+            # 顺序处理所有图片（避免并发过高）
+            for image_url, image_md5 in images_to_check:
+                try:
+                    # 进行图片审核
+                    logger.debug(f"开始审核图片，URL: {image_url}")
+                    risk_level, risk_reason, md5_hash = await self._censor_flow.submit_image(
+                        image_url,
+                        group_id,
+                        precalculated_md5=image_md5,
+                        base_expire_hours=base_expire_hours,
+                        max_expire_days=max_expire_days,
+                    )
+                    logger.debug(
+                        f"图片审核完成，结果: 风险等级={risk_level.name}, 原因={risk_reason}, MD5={md5_hash}"
+                    )
 
-            # 处理违规
-            if risk_level in (RiskLevel.Review, RiskLevel.Block):
-                logger.debug("检测到违规图片，开始处理")
-                await self._handle_violation(
-                    event,
-                    group_id,
-                    user_id,
-                    user_name,
-                    md5_hash,
-                    image_url,
-                    risk_level,
-                    risk_reason,
-                    message_id,
-                )
-                logger.debug("违规图片处理完成")
-            else:
-                logger.debug("图片审核通过，无需处理")
+                    # 处理违规
+                    if risk_level in (RiskLevel.Review, RiskLevel.Block):
+                        logger.debug("检测到违规图片，开始处理")
+                        await self._handle_violation(
+                            event,
+                            group_id,
+                            user_id,
+                            user_name,
+                            md5_hash,
+                            image_url,
+                            risk_level,
+                            risk_reason,
+                            message_id,
+                        )
+                        logger.debug("违规图片处理完成")
+                    else:
+                        logger.debug("图片审核通过，无需处理")
+                except CensorError as e:
+                    logger.error(f"图片审核异常: {e}")
+                    logger.debug(f"审核异常详情: {str(e)}")
+                except Exception as e:
+                    logger.error(f"处理图片异常: {e}")
+                    logger.debug(f"处理图片异常详情: {str(e)}")
 
         except CensorError as e:
             logger.error(f"图片审核异常: {e}")
@@ -1120,18 +1222,29 @@ class ImageReviewPlugin(Star):
 
             user_id = user_id_str.strip()
 
-            target_group_id = self._get_group_id_by_manage_group(manage_group_id)
-            if not target_group_id:
+            target_group_ids = self._get_group_ids_by_manage_group(manage_group_id)
+            if not target_group_ids:
                 yield event.plain_result("❌ 未找到对应的被管理群")
                 return
 
-            deleted_count = await self._db.delete_user_violations(
-                user_id, target_group_id
-            )
+            # 删除该管理群对应的所有被管理群中的违规记录
+            total_deleted = 0
+            deleted_details = []
+            for target_group_id in target_group_ids:
+                deleted_count = await self._db.delete_user_violations(
+                    user_id, target_group_id
+                )
+                total_deleted += deleted_count
+                if deleted_count > 0:
+                    deleted_details.append(f"群 {target_group_id}: {deleted_count} 条")
 
-            yield event.plain_result(
-                f"✅ 已删除用户 {user_id} 在群 {target_group_id} 的违规记录，共 {deleted_count} 条"
-            )
+            if total_deleted > 0:
+                details_str = "\n".join(deleted_details)
+                yield event.plain_result(
+                    f"✅ 已删除用户 {user_id} 的违规记录，共 {total_deleted} 条\n{details_str}"
+                )
+            else:
+                yield event.plain_result(f"⚠️ 用户 {user_id} 暂无违规记录")
 
         except Exception as e:
             logger.error(f"删除违规记录异常: {e}")
@@ -1429,9 +1542,14 @@ class ImageReviewPlugin(Star):
 
     @filter.command("添加黑名单")
     async def add_manual_blacklist_cmd(
-        self, event: AstrMessageEvent, risk_level_str: str = "", *, reason: str = ""
+        self, event: AstrMessageEvent, risk_level_str: str = "", reason: str = ""
     ):
-        """添加图片到人工黑名单（管理群专用，需引用图片）"""
+        """添加图片到人工黑名单（管理群专用，需引用图片）
+
+        使用方法: /添加黑名单 [REVIEW/BLOCK] [原因]
+        示例: /添加黑名单 BLOCK 色情内容
+        示例: /添加黑名单 REVIEW 需要复审
+        """
         try:
             manage_group_id = (
                 str(event.get_group_id()) if event.get_group_id() else None
@@ -1701,6 +1819,8 @@ class ImageReviewPlugin(Star):
                 "【人工白名单管理】\n"
                 "━━━━━━━━━━━━━━━\n"
                 "/添加白名单 [原因] - 添加图片到白名单(需引用)\n"
+                "  提示: 原因含空格时用引号包裹，如:\n"
+                '  /添加白名单 "误拦截，正常图片"\n'
                 "/移除白名单 - 从白名单移除图片(需引用)\n"
                 "/清空白名单 确认 - 清空所有人工白名单\n"
                 "\n"
@@ -1708,6 +1828,8 @@ class ImageReviewPlugin(Star):
                 "━━━━━━━━━━━━━━━\n"
                 "/添加黑名单 [REVIEW/BLOCK] [原因]\n"
                 "  添加图片到黑名单(需引用图片)\n"
+                "  提示: 原因含空格时用引号包裹，如:\n"
+                '  /添加黑名单 BLOCK "色情违规内容"\n'
                 "/移除黑名单 - 从黑名单移除图片(需引用)\n"
                 "/清空黑名单 确认 - 清空所有人工黑名单\n"
                 "\n"
@@ -1722,6 +1844,7 @@ class ImageReviewPlugin(Star):
                 "• REVIEW=建议复审, BLOCK=违规拦截\n"
                 "• 管理员/群主违规仅通知，不执行处罚\n"
                 "• 机器人需为群主才能处理管理员\n"
+                "• 参数含空格时请用引号包裹\n"
                 "━━━━━━━━━━━━━━━"
             )
 
