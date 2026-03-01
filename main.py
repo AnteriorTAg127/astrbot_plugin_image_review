@@ -1249,13 +1249,12 @@ class ImageReviewPlugin(Star):
             status_info += "\n📌 群聊审查模式\n"
             status_info += "━━━━━━━━━━━━━━━\n"
             for gid, config in self._group_config.items():
-                manage_gid = config["manage_group_id"]
                 if config.get("enable_auto_censor", False):
                     # 智能审查模式
                     schedule = config.get("auto_censor_schedule", "")
                     no_admin_min = config.get("auto_censor_no_admin_minutes", 0)
                     status_info += f"群 {gid}:\n"
-                    status_info += f"  └ 模式: 智能审查\n"
+                    status_info += "  └ 模式: 智能审查\n"
                     if schedule:
                         status_info += f"  └ 强制时段: {schedule}\n"
                     if no_admin_min > 0:
@@ -1263,7 +1262,7 @@ class ImageReviewPlugin(Star):
                 else:
                     # 全量审查模式
                     status_info += f"群 {gid}:\n"
-                    status_info += f"  └ 模式: 全量审查\n"
+                    status_info += "  └ 模式: 全量审查\n"
 
                 # 显示当前该群是否应该开启审查
                 should_enable, reason = self._should_enable_censor(gid)
