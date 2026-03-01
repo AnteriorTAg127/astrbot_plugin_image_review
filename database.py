@@ -132,23 +132,6 @@ class DatabaseManager:
                 )
             """)
 
-            # 上下文消息缓存表（用于违规时转发）
-            logger.debug("创建消息缓存表")
-            await cursor.execute("""
-                CREATE TABLE IF NOT EXISTS message_cache (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    group_id TEXT NOT NULL,
-                    message_id TEXT NOT NULL,
-                    user_id TEXT NOT NULL,
-                    user_name TEXT,
-                    message_content TEXT,
-                    message_type TEXT,
-                    image_url TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(group_id, message_id)
-                )
-            """)
-
             # 创建索引
             logger.debug("创建索引")
             await cursor.execute("""
@@ -162,9 +145,6 @@ class DatabaseManager:
             """)
             await cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_violation_group ON violation_records(group_id)
-            """)
-            await cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_message_cache_group ON message_cache(group_id, created_at)
             """)
 
             await conn.commit()
@@ -587,90 +567,6 @@ class DatabaseManager:
             await conn.commit()
             return cursor.rowcount
 
-    async def cache_message(
-        self,
-        group_id: str,
-        message_id: str,
-        user_id: str,
-        user_name: str,
-        message_content: str,
-        message_type: str = "text",
-        image_url: str | None = None,
-    ):
-        """
-        缓存消息用于违规时转发
-
-        Args:
-            group_id: 群ID
-            message_id: 消息ID
-            user_id: 用户ID
-            user_name: 用户名
-            message_content: 消息内容
-            message_type: 消息类型
-            image_url: 图片URL
-        """
-        await self._init_db()
-
-        async with aiosqlite.connect(self._db_path) as conn:
-            cursor = await conn.cursor()
-            await cursor.execute(
-                """INSERT OR REPLACE INTO message_cache
-                   (group_id, message_id, user_id, user_name, message_content, message_type, image_url)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    group_id,
-                    message_id,
-                    user_id,
-                    user_name,
-                    message_content,
-                    message_type,
-                    image_url,
-                ),
-            )
-            await conn.commit()
-
-    async def get_recent_messages(self, group_id: str, count: int = 5) -> list[dict]:
-        """
-        获取最近的群消息
-
-        Args:
-            group_id: 群ID
-            count: 消息数量
-
-        Returns:
-            消息列表
-        """
-        await self._init_db()
-
-        async with aiosqlite.connect(self._db_path) as conn:
-            conn.row_factory = aiosqlite.Row
-            cursor = await conn.cursor()
-            await cursor.execute(
-                """SELECT * FROM message_cache
-                   WHERE group_id = ?
-                   ORDER BY created_at DESC LIMIT ?""",
-                (group_id, count),
-            )
-            rows = await cursor.fetchall()
-            return [dict(row) for row in reversed(rows)]
-
-    async def clean_expired_cache(self, max_age_hours: int = 24):
-        """
-        清理过期的消息缓存
-
-        Args:
-            max_age_hours: 最大缓存时间（小时）
-        """
-        await self._init_db()
-
-        async with aiosqlite.connect(self._db_path) as conn:
-            cursor = await conn.cursor()
-            cutoff_time = (datetime.now() - timedelta(hours=max_age_hours)).isoformat()
-            await cursor.execute(
-                "DELETE FROM message_cache WHERE created_at < ?", (cutoff_time,)
-            )
-            await conn.commit()
-
     async def clean_expired_list_entries(self):
         """清理过期的黑白名单条目"""
         await self._init_db()
@@ -877,3 +773,18 @@ class DatabaseManager:
             )
             await conn.commit()
             return cursor.rowcount > 0
+
+    async def get_cache_counts(self) -> dict:
+        """获取自动黑白名单数量统计"""
+        await self._init_db()
+
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+
+            await cursor.execute("SELECT COUNT(*) FROM whitelist")
+            whitelist_count = (await cursor.fetchone())[0]
+
+            await cursor.execute("SELECT COUNT(*) FROM blacklist")
+            blacklist_count = (await cursor.fetchone())[0]
+
+            return {"whitelist": whitelist_count, "blacklist": blacklist_count}

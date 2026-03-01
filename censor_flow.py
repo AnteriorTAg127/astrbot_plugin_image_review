@@ -119,8 +119,11 @@ async def download_image(url: str, max_size_mb: int = 10) -> bytes:
 
             data = b"".join(chunks)
 
-            # 验证下载的内容是否为有效图片
-            if not _validate_image_content(data):
+            # 验证下载的内容是否为有效图片（在线程池中执行以避免阻塞事件循环，设置5秒超时）
+            is_valid = await asyncio.wait_for(
+                asyncio.to_thread(_validate_image_content, data), timeout=5.0
+            )
+            if not is_valid:
                 raise CensorError("下载的内容不是有效的图片格式")
 
             return data
@@ -259,6 +262,9 @@ class CensorFlow:
             max_expire_days if max_expire_days is not None else self._max_expire_days
         )
 
+        # 用于保存下载的图片数据，供后续动图检测使用
+        downloaded_image_data: bytes | None = None
+
         try:
             logger.debug(f"开始审核图片，URL: {image_url}, 群: {group_id}")
             # 如果提供了预计算的MD5，直接使用
@@ -268,9 +274,9 @@ class CensorFlow:
             else:
                 # 下载图片
                 logger.debug("下载图片")
-                image_data = await download_image(image_url)
-                logger.debug(f"图片下载完成，大小: {len(image_data)}字节")
-                md5_hash = DatabaseManager.calculate_md5(image_data)
+                downloaded_image_data = await download_image(image_url)
+                logger.debug(f"图片下载完成，大小: {len(downloaded_image_data)}字节")
+                md5_hash = DatabaseManager.calculate_md5(downloaded_image_data)
                 logger.debug(f"计算MD5完成: {md5_hash}")
 
             # 1. 检查人工白名单（最高优先级）
@@ -337,11 +343,19 @@ class CensorFlow:
             ):
                 logger.debug("开始动图增强检测")
                 try:
-                    # 下载图片数据用于动图检测
-                    image_data = await download_image(image_url)
+                    # 使用已下载的图片数据进行动图检测
+                    # 如果没有预下载的数据（使用了precalculated_md5），需要下载
+                    if downloaded_image_data is None:
+                        logger.debug("预计算MD5模式，需要下载图片进行动图检测")
+                        downloaded_image_data = await download_image(image_url)
 
-                    # 检测是否为动图
-                    is_animated, frame_count = GIFCensor.is_animated_image(image_data)
+                    # 检测是否为动图（在线程池中执行以避免阻塞事件循环，设置10秒超时）
+                    is_animated, frame_count = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            GIFCensor.is_animated_image, downloaded_image_data
+                        ),
+                        timeout=10.0,
+                    )
 
                     if is_animated and frame_count > 1:
                         logger.info(
@@ -350,7 +364,9 @@ class CensorFlow:
                         (
                             gif_risk_level,
                             gif_risk_reason,
-                        ) = await self._gif_censor.detect_animated_image(image_data)
+                        ) = await self._gif_censor.detect_animated_image(
+                            downloaded_image_data
+                        )
 
                         if gif_risk_level in (RiskLevel.Review, RiskLevel.Block):
                             logger.warning(f"动图增强检测到违规: {gif_risk_reason}")

@@ -3,7 +3,7 @@
 图片审核插件 / An image review plugin for AstrBot
 
 [![License](https://img.shields.io/github/license/AnteriorTAg127/astrbot_plugin_image_review)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v1.1.4-blue)](metadata.yaml)
+[![Version](https://img.shields.io/badge/version-v1.2.0-blue)](metadata.yaml)
 
 > [!NOTE]
 > 这是一个为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 提供图片内容审核功能的插件。
@@ -11,6 +11,12 @@
 > [AstrBot](https://github.com/AstrBotDevs/AstrBot) 是一个支持多个主流即时通讯平台的智能助手，包括 QQ、Telegram、飞书、钉钉、Slack、Discord 等。本插件为 AstrBot 提供图片内容审核能力，帮助群管理员过滤不当图片内容。
 
 ## 更新日志
+
+### v1.2.0
+
+- **新增智能审查模式** - 支持定时审查和管理在线检测，夜间强制检查，白天智能补漏
+- **新增管理员列表缓存** - 缓存管理员身份，避免频繁查询
+- **审核状态增强** - 显示审查模式、自动黑白名单数量等详细信息
 
 ### v1.1.4
 
@@ -118,7 +124,10 @@ VLAI 使用 AstrBot 已配置的 LLM 提供商进行图片审核：
       "auto_recall": true,
       "auto_mute": true,
       "base_expire_hours": 2,
-      "max_expire_days": 14
+      "max_expire_days": 14,
+      "enable_auto_censor": true,
+      "auto_censor_schedule": "23:00-09:00",
+      "auto_censor_no_admin_minutes": 30
     }
   ]
 }
@@ -179,6 +188,96 @@ VLAI 使用 AstrBot 已配置的 LLM 提供商进行图片审核：
 | `group_settings[].auto_mute` | bool | 是否自动禁言违规用户 | `true` |
 | `group_settings[].base_expire_hours` | int | 缓存基础过期时间（小时） | `2` |
 | `group_settings[].max_expire_days` | int | 缓存最大过期时间（天） | `14` |
+| `group_settings[].enable_auto_censor` | bool | 启用智能审查模式 | `false` |
+| `group_settings[].auto_censor_schedule` | string | 强制审查时间段 (hh:mm-hh:mm) | `""` |
+| `group_settings[].auto_censor_no_admin_minutes` | int | 管理在线检测时间（分钟） | `0` |
+
+## 智能审查模式
+
+插件支持两种审查模式：
+
+### 全量审查模式（默认）
+
+不启用 `enable_auto_censor` 时，对所有已配置群聊的图片进行全量审查。
+
+### 智能审查模式
+
+启用 `enable_auto_censor: true` 后，插件会根据时间段和管理员在线状态智能决定是否审查：
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│              智能审查模式开关 (enable_auto_censor)            │
+└─────────────────────────────────────────────────────────────┘
+                              │
+              ┌───────────────┴───────────────┐
+              ▼                               ▼
+       ┌─────────────┐                 ┌─────────────┐
+       │   关闭       │                 │    开启     │
+       │  (默认)      │                 │  (智能模式)  │
+       └─────────────┘                 └─────────────┘
+              │                               │
+              ▼                               ▼
+        ┌───────────┐                 ┌─────────────────────┐
+        │ 全量审查   │                 │   强制审查时间段     │
+        │ 始终检查   │                 │ (auto_censor_schedule)│
+        │           │                 │   例: 23:00-09:00   │
+        └───────────┘                 │   （夜间管理睡觉）   │
+                                      └─────────────────────┘
+                                                    │
+                                    ┌───────────────┴───────────────┐
+                                    ▼                               ▼
+                            ┌─────────────┐                 ┌─────────────────────┐
+                            │  在时间段内  │                 │    不在时间段内      │
+                            │  （夜间）   │                 │    （白天管理可能在）  │
+                            └─────────────┘                 └─────────────────────┘
+                                    │                               │
+                                    ▼                               ▼
+                            ┌─────────────┐                 ┌─────────────────────┐
+                            │   始终检查   │                 │  管理在线检测        │
+                            │  （值守）   │                 │(auto_censor_no_admin │
+                            └─────────────┘                 │    _minutes)         │
+                                                            │    例: 30分钟        │
+                                                            └─────────────────────┘
+                                                                          │
+                                                          ┌───────────────┴───────────────┐
+                                                          ▼                               ▼
+                                                  ┌─────────────┐                 ┌─────────────┐
+                                                  │ 管理x分钟内  │                 │ 管理x分钟未  │
+                                                  │   有发言    │                 │   发言      │
+                                                  │  （管理在）  │                 │  （管理不在） │
+                                                  └─────────────┘                 └─────────────┘
+                                                          │                               │
+                                                          ▼                               ▼
+                                                  ┌─────────────┐                 ┌─────────────┐
+                                                  │   关闭检查   │                 │   开启检查   │
+                                                  │  （不打扰）  │                 │  （自动补漏） │
+                                                  └─────────────┘                 └─────────────┘
+```
+
+### 智能审查配置示例
+
+**场景：夜间强制检查，白天智能检测**
+
+```json
+{
+  "group_settings": [{
+    "enabled": true,
+    "group_id": "123456789",
+    "manage_group_id": "987654321",
+    "enable_auto_censor": true,
+    "auto_censor_schedule": "23:00-09:00",
+    "auto_censor_no_admin_minutes": 30
+  }]
+}
+```
+
+**效果说明：**
+- **23:00-09:00（夜间）**：始终检查（管理睡觉，自动值守）
+- **09:00-23:00（白天）**：
+  - 管理30分钟内有发言 → 关闭检查（管理在，不打扰）
+  - 管理30分钟未发言 → 开启检查（管理不在，自动补漏）
+
+> **注意**：跨天时间格式也支持，如 `22:00-08:00` 表示晚上22点到次日8点
 
 ## 使用说明
 

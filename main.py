@@ -7,7 +7,7 @@ import asyncio
 import math
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import aiofiles
@@ -57,7 +57,7 @@ def _sanitize_filename(filename: str) -> str:
     "image_review",
     "AnteriorTAg127",
     "图片审核插件，提供图片内容审核、违规处理、管理群通知等功能",
-    "1.1.0",
+    "1.2.0",
 )
 class ImageReviewPlugin(Star):
     """图片审核插件主类"""
@@ -76,21 +76,17 @@ class ImageReviewPlugin(Star):
         # 数据目录（使用AstrBot规范的插件数据目录）
         self._data_dir = os.path.join(get_astrbot_plugin_data_path(), "image_review")
         os.makedirs(self._data_dir, exist_ok=True)
-        logger.debug(f"图片审核插件数据目录: {self._data_dir}")
 
         # 证据图片保存目录
         self._evidence_dir = os.path.join(self._data_dir, "evidence")
         os.makedirs(self._evidence_dir, exist_ok=True)
-        logger.debug(f"证据图片目录: {self._evidence_dir}")
 
         # 初始化数据库
         self._db = DatabaseManager(self._data_dir)
-        logger.debug("数据库管理器初始化完成")
 
         # 群聊配置映射 {group_id: {manage_group_id, violation_settings, cache_settings}}
         self._group_config: dict[str, dict] = {}
         self._load_group_config()
-        logger.debug(f"已加载 {len(self._group_config)} 个群聊配置")
 
         # 审核流程管理器（延迟初始化）
         self._censor_flow: CensorFlow | None = None
@@ -98,27 +94,33 @@ class ImageReviewPlugin(Star):
         # 定时任务引用
         self._cleanup_task: asyncio.Task | None = None
 
+        # 管理员列表缓存 {group_id: {"admins": set(), "expires_at": datetime}}
+        self._admin_cache: dict[str, dict] = {}
+        self._admin_cache_ttl = 300  # 管理员缓存5分钟
+
+        # 群聊最后管理员发言时间 {group_id: datetime}
+        self._last_admin_message_time: dict[str, datetime] = {}
+
+        # 群聊审查状态缓存 {group_id: {"enabled": bool, "reason": str}}
+        self._censor_status_cache: dict[str, dict] = {}
+
         logger.debug("图片审核插件初始化完成")
 
     def _load_group_config(self):
         """加载群聊配置"""
         group_settings = self._config.get("group_settings", [])
-        logger.debug(f"开始加载群聊配置，共 {len(group_settings)} 个配置项")
 
         # 如果是旧格式的dict（兼容旧版本配置）
         if isinstance(group_settings, dict):
             group_settings = [group_settings]
-            logger.debug("检测到旧格式配置，已转换为列表格式")
 
         for i, setting in enumerate(group_settings):
             # 确保是有效配置
             if not isinstance(setting, dict):
-                logger.debug(f"配置项 {i + 1} 不是字典类型，跳过")
                 continue
 
             # 跳过非启用的配置（兼容template_list格式）
             if not setting.get("enabled", True):
-                logger.debug(f"配置项 {i + 1} 未启用，跳过")
                 continue
             group_id = str(setting.get("group_id", ""))
             manage_group_id = str(setting.get("manage_group_id", ""))
@@ -173,6 +175,11 @@ class ImageReviewPlugin(Star):
                     setting.get("max_expire_days"), 14, min_val=1, max_val=365
                 )
 
+                # 解析自动审查配置
+                enable_auto_censor = setting.get("enable_auto_censor", False)
+                auto_censor_schedule = setting.get("auto_censor_schedule", "")
+                schedule_parsed = self._parse_schedule(auto_censor_schedule)
+
                 # 保存每个群的完整配置
                 self._group_config[group_id] = {
                     "manage_group_id": manage_group_id,
@@ -183,21 +190,21 @@ class ImageReviewPlugin(Star):
                     "auto_mute": setting.get("auto_mute", True),
                     "base_expire_hours": base_expire_hours,
                     "max_expire_days": max_expire_days,
+                    "enable_auto_censor": enable_auto_censor,
+                    "auto_censor_schedule": auto_censor_schedule,
+                    "schedule_parsed": schedule_parsed,
+                    "auto_censor_no_admin_minutes": setting.get(
+                        "auto_censor_no_admin_minutes", 0
+                    ),
                 }
                 logger.info(f"已加载群聊配置: 群{group_id} -> 管理群{manage_group_id}")
-            else:
-                logger.debug(f"配置项 {i + 1} 缺少群ID或管理群ID，跳过")
-        logger.debug(f"群聊配置加载完成，共加载 {len(self._group_config)} 个有效配置")
 
     async def initialize(self):
         """插件初始化"""
         try:
-            logger.debug("开始初始化图片审核插件")
             # 初始化审核流程管理器，传入 context 以支持 VLAI 审核器
             self._censor_flow = CensorFlow(self._config, self._db, self.context)
-            logger.debug("审核流程管理器创建完成，开始初始化")
             await self._censor_flow.initialize()
-            logger.debug("审核流程管理器初始化完成")
 
             if self._censor_flow.is_image_censor_enabled():
                 logger.info("图片审核插件初始化成功，已启用图片审核")
@@ -206,10 +213,8 @@ class ImageReviewPlugin(Star):
 
             # 启动定时清理任务（每天执行一次）
             self._cleanup_task = asyncio.create_task(self._cleanup_expired_entries())
-            logger.debug("定时清理任务已启动")
         except Exception as e:
             logger.error(f"图片审核插件初始化失败: {e}")
-            logger.debug(f"初始化失败详情: {str(e)}")
 
     async def _cleanup_expired_entries(self):
         """定时清理过期的黑白名单条目"""
@@ -217,11 +222,8 @@ class ImageReviewPlugin(Star):
             try:
                 # 每天执行一次清理
                 await asyncio.sleep(24 * 60 * 60)  # 24小时
-                logger.debug("开始执行定时清理过期黑白名单")
                 await self._db.clean_expired_list_entries()
-                logger.debug("定时清理过期黑白名单完成")
             except asyncio.CancelledError:
-                logger.debug("定时清理任务被取消")
                 break
             except Exception as e:
                 logger.error(f"定时清理过期黑白名单异常: {e}")
@@ -230,20 +232,15 @@ class ImageReviewPlugin(Star):
 
     async def terminate(self):
         """插件销毁"""
-        logger.debug("开始卸载图片审核插件")
         # 取消定时清理任务
         if self._cleanup_task:
-            logger.debug("取消定时清理任务")
             self._cleanup_task.cancel()
             try:
                 await self._cleanup_task
             except asyncio.CancelledError:
                 pass
-            logger.debug("定时清理任务已取消")
         if self._censor_flow:
-            logger.debug("关闭审核流程管理器")
             await self._censor_flow.close()
-            logger.debug("审核流程管理器已关闭")
         logger.info("图片审核插件已卸载")
 
     def _get_group_config(self, group_id: str) -> dict | None:
@@ -335,8 +332,6 @@ class ImageReviewPlugin(Star):
                 # 验证MD5格式（32位十六进制字符串）
                 if self._is_valid_md5(md5_hex):
                     return md5_hex.lower()
-                else:
-                    logger.debug(f"提取的MD5格式无效: {md5_hex}")
         except Exception as e:
             logger.debug(f"提取图片MD5时发生异常: {e}")
         return None
@@ -352,6 +347,199 @@ class ImageReviewPlugin(Star):
             是否启用
         """
         return group_id in self._group_config
+
+    def _parse_schedule(
+        self, schedule_str: str
+    ) -> tuple[datetime.time, datetime.time] | None:
+        """
+        解析定时开启时间配置
+
+        Args:
+            schedule_str: 时间字符串，格式: hh:mm-hh:mm
+
+        Returns:
+            (start_time, end_time) 元组，解析失败返回None
+        """
+        if not schedule_str or not schedule_str.strip():
+            return None
+
+        try:
+            schedule_str = schedule_str.strip()
+            match = re.match(r"^(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})$", schedule_str)
+            if not match:
+                logger.warning(
+                    f"定时开启配置格式错误: {schedule_str}，应为 hh:mm-hh:mm 格式"
+                )
+                return None
+
+            start_hour, start_min, end_hour, end_min = map(int, match.groups())
+
+            # 验证时间范围
+            if not (0 <= start_hour <= 23 and 0 <= start_min <= 59):
+                logger.warning(f"定时开启开始时间无效: {start_hour}:{start_min}")
+                return None
+            if not (0 <= end_hour <= 23 and 0 <= end_min <= 59):
+                logger.warning(f"定时开启结束时间无效: {end_hour}:{end_min}")
+                return None
+
+            start_time = datetime.strptime(
+                f"{start_hour:02d}:{start_min:02d}", "%H:%M"
+            ).time()
+            end_time = datetime.strptime(
+                f"{end_hour:02d}:{end_min:02d}", "%H:%M"
+            ).time()
+
+            return (start_time, end_time)
+        except Exception as e:
+            logger.warning(f"解析定时开启配置失败: {schedule_str}, 错误: {e}")
+            return None
+
+    def _is_in_schedule(
+        self, schedule: tuple[datetime.time, datetime.time] | None
+    ) -> bool:
+        """
+        检查当前时间是否在定时开启时间段内
+
+        Args:
+            schedule: (start_time, end_time) 元组
+
+        Returns:
+            是否在时间段内
+        """
+        if not schedule:
+            return False
+
+        now = datetime.now().time()
+        start_time, end_time = schedule
+
+        # 处理跨天的情况 (如 22:00-08:00)
+        if start_time <= end_time:
+            return start_time <= now <= end_time
+        else:
+            return now >= start_time or now <= end_time
+
+    async def _get_group_admins(
+        self, event: AstrMessageEvent, group_id: str
+    ) -> set[str]:
+        """
+        获取群管理员列表（带缓存）
+
+        Args:
+            event: 消息事件
+            group_id: 群ID
+
+        Returns:
+            管理员和群主QQ号集合
+        """
+        now = datetime.now()
+
+        # 检查缓存
+        if group_id in self._admin_cache:
+            cache = self._admin_cache[group_id]
+            if now < cache["expires_at"]:
+                return cache["admins"]
+
+        admins = set()
+        try:
+            platform_name = event.get_platform_name()
+            if platform_name == "aiocqhttp":
+                from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
+                    AiocqhttpMessageEvent,
+                )
+
+                if isinstance(event, AiocqhttpMessageEvent):
+                    client = event.bot
+                    # 获取群成员列表
+                    member_list = await client.api.call_action(
+                        "get_group_member_list",
+                        group_id=int(group_id),
+                    )
+                    if member_list:
+                        for member in member_list:
+                            role = member.get("role", "member")
+                            if role in ("owner", "admin"):
+                                admins.add(str(member.get("user_id", "")))
+        except Exception as e:
+            logger.debug(f"获取群管理员列表失败: {e}")
+
+        # 更新缓存
+        self._admin_cache[group_id] = {
+            "admins": admins,
+            "expires_at": now + timedelta(seconds=self._admin_cache_ttl),
+        }
+
+        return admins
+
+    async def _is_user_admin_cached(
+        self, event: AstrMessageEvent, group_id: str, user_id: str
+    ) -> bool:
+        """
+        检查用户是否为管理员（使用缓存）
+
+        Args:
+            event: 消息事件
+            group_id: 群ID
+            user_id: 用户ID
+
+        Returns:
+            是否为管理员或群主
+        """
+        admins = await self._get_group_admins(event, group_id)
+        return user_id in admins
+
+    def _should_enable_censor(self, group_id: str) -> tuple[bool, str]:
+        """
+        判断是否应该开启审查
+
+        逻辑说明:
+        1. 如果未启用智能审查模式 → 始终开启审查（全量审查模式）
+        2. 如果启用了智能审查模式:
+           - 如果在强制审查时间段内（如夜间）→ 始终开启审查
+           - 如果在强制审查时间段外（如白天）:
+             * 如果设置了管理在线检测时间:
+               · 管理员x分钟内有发言 → 关闭检查（管理在，不打扰）
+               · 管理员x分钟未发言 → 开启检查（管理不在，自动补漏）
+             * 如果未设置检测时间 → 始终开启检查
+
+        Args:
+            group_id: 群ID
+
+        Returns:
+            (是否开启, 原因)
+        """
+        config = self._group_config.get(group_id)
+        if not config:
+            return (False, "未配置")
+
+        # 检查是否启用了智能审查模式
+        if not config.get("enable_auto_censor", False):
+            # 未启用智能审查，使用全量审查模式（始终检查）
+            return (True, "全量审查模式")
+
+        # 启用了智能审查模式
+        # 检查是否在强制审查时间段内（夜间管理睡觉时强制检查）
+        schedule = config.get("schedule_parsed")
+        if schedule and self._is_in_schedule(schedule):
+            return (True, "智能审查-强制时间段")
+
+        # 在强制审查时间段外（白天），检查管理员是否在线
+        no_admin_minutes = config.get("auto_censor_no_admin_minutes", 0)
+        if no_admin_minutes > 0:
+            last_admin_time = self._last_admin_message_time.get(group_id)
+            if last_admin_time:
+                elapsed = (datetime.now() - last_admin_time).total_seconds() / 60
+                if elapsed >= no_admin_minutes:
+                    # 管理x分钟未发言，开启检查
+                    return (True, f"智能审查-管理不在线({int(elapsed)}分钟)")
+                else:
+                    # 管理x分钟内有发言，关闭检查
+                    return (False, f"智能审查-管理在线({int(elapsed)}分钟前发言)")
+            else:
+                # 没有记录过管理员发言，视为管理不在线，开启检查
+                return (True, "智能审查-管理不在线(无记录)")
+
+        # 未设置管理在线检测，非强制时间段内始终检查
+        return (True, "智能审查-非强制时间段")
 
     def _is_manage_group(self, group_id: str) -> bool:
         """
@@ -435,11 +623,7 @@ class ImageReviewPlugin(Star):
                         role = member_info.get("role", "member")
                         # owner=群主, admin=管理员
                         is_admin = role in ("owner", "admin")
-                        logger.debug(
-                            f"用户 {user_id} 在群 {group_id} 的身份: {role}, 是否管理员: {is_admin}"
-                        )
                         return is_admin
-            logger.debug(f"平台 {platform_name} 暂不支持检查用户身份")
             return False
         except Exception as e:
             logger.debug(f"检查用户身份失败: {e}")
@@ -472,13 +656,9 @@ class ImageReviewPlugin(Star):
             message_id: 消息ID
         """
         try:
-            logger.debug(
-                f"开始处理违规图片: 用户={user_id}, 群={group_id}, 风险等级={risk_level.name}"
-            )
             # 获取该群的配置
             group_config = self._get_group_config(group_id)
             if not group_config:
-                logger.debug(f"群 {group_id} 未配置，跳过处理")
                 return
 
             # 检查用户是否为管理员或群主
@@ -506,14 +686,10 @@ class ImageReviewPlugin(Star):
 
             # 1. 自动撤回违规图片
             if group_config.get("auto_recall", True):
-                logger.debug(f"撤回违规消息，消息ID: {message_id}")
                 await self._recall_message(event, message_id)
-                logger.debug("违规消息撤回完成")
 
             # 2. 计算禁言时长
-            logger.debug("计算禁言时长，获取用户违规次数")
             violation_count = await self._db.get_user_violation_count(user_id, group_id)
-            logger.debug(f"用户当前违规次数: {violation_count}")
             first_mute = group_config.get("first_mute_duration", 600)
             multiplier = group_config.get("mute_multiplier", 2)
             max_mute = group_config.get("max_mute_duration", 2419200)
@@ -521,18 +697,14 @@ class ImageReviewPlugin(Star):
             minutes = math.ceil(raw_duration / 60)
             mute_duration = minutes * 60
             mute_duration = min(mute_duration, max_mute)
-            logger.debug(f"计算禁言时长: {mute_duration}秒 ({minutes}分钟)")
 
             # 3. 执行禁言（如果开启自动禁言）
             if group_config.get("auto_mute", True):
-                logger.debug(f"执行禁言，用户={user_id}, 时长={mute_duration}秒")
                 await self._mute_user(event, group_id, user_id, mute_duration)
             else:
-                logger.debug("自动禁言已关闭，跳过禁言操作")
                 mute_duration = 0
 
             # 4. 记录违规
-            logger.debug("记录违规到数据库")
             await self._db.record_violation(
                 user_id=user_id,
                 group_id=group_id,
@@ -543,13 +715,11 @@ class ImageReviewPlugin(Star):
                 mute_duration=mute_duration,
                 message_id=message_id,
             )
-            logger.debug("违规记录完成")
 
             # 违规次数+1（因为刚记录的违规）
             violation_count += 1
 
             # 5. 发送到管理群
-            logger.debug("通知管理群")
             await self._notify_manage_group(
                 event,
                 group_id,
@@ -564,7 +734,6 @@ class ImageReviewPlugin(Star):
                 auto_recall=group_config.get("auto_recall", True),
                 auto_mute=group_config.get("auto_mute", True),
             )
-            logger.debug("管理群通知完成")
 
             logger.info(
                 f"处理违规图片: 用户={user_id}, 群={group_id}, "
@@ -573,7 +742,6 @@ class ImageReviewPlugin(Star):
 
         except Exception as e:
             logger.error(f"处理违规图片异常: {e}")
-            logger.debug(f"处理违规异常详情: {str(e)}")
 
     async def _recall_message(self, event: AstrMessageEvent, message_id: str):
         """
@@ -585,7 +753,6 @@ class ImageReviewPlugin(Star):
         """
         try:
             platform_name = event.get_platform_name()
-            logger.debug(f"开始撤回消息，平台: {platform_name}, 消息ID: {message_id}")
             if platform_name == "aiocqhttp":
                 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
                     AiocqhttpMessageEvent,
@@ -593,14 +760,9 @@ class ImageReviewPlugin(Star):
 
                 if isinstance(event, AiocqhttpMessageEvent):
                     client = event.bot
-                    logger.debug("调用CQHTTP API撤回消息")
                     await client.api.call_action("delete_msg", message_id=message_id)
-                    logger.debug("消息撤回成功")
-            else:
-                logger.debug(f"平台 {platform_name} 暂不支持撤回消息")
         except Exception as e:
             logger.error(f"撤回消息失败: {e}")
-            logger.debug(f"撤回消息异常详情: {str(e)}")
 
     async def _download_evidence_image(
         self, image_url: str, group_id: str, user_id: str
@@ -620,8 +782,6 @@ class ImageReviewPlugin(Star):
             import hashlib
 
             from .censor_flow import download_image
-
-            logger.debug(f"开始下载违规证据图片，URL: {image_url}")
 
             image_data = await download_image(image_url)
 
@@ -647,12 +807,10 @@ class ImageReviewPlugin(Star):
             async with aiofiles.open(file_path, "wb") as f:
                 await f.write(image_data)
 
-            logger.debug(f"证据图片已保存: {file_path}")
             return file_path
 
         except Exception as e:
             logger.error(f"下载证据图片失败: {e}")
-            logger.debug(f"下载证据图片异常详情: {str(e)}")
             return None
 
     async def _mute_user(
@@ -669,9 +827,6 @@ class ImageReviewPlugin(Star):
         """
         try:
             platform_name = event.get_platform_name()
-            logger.debug(
-                f"开始禁言用户，平台: {platform_name}, 用户={user_id}, 群={group_id}, 时长={duration}秒"
-            )
             if platform_name == "aiocqhttp":
                 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
                     AiocqhttpMessageEvent,
@@ -679,7 +834,6 @@ class ImageReviewPlugin(Star):
 
                 if isinstance(event, AiocqhttpMessageEvent):
                     client = event.bot
-                    logger.debug("调用CQHTTP API禁言用户")
                     await client.api.call_action(
                         "set_group_ban",
                         group_id=int(group_id),
@@ -687,12 +841,8 @@ class ImageReviewPlugin(Star):
                         duration=duration,
                     )
                     logger.info(f"已禁言用户 {user_id}，时长 {duration} 秒")
-                    logger.debug("用户禁言成功")
-            else:
-                logger.debug(f"平台 {platform_name} 暂不支持禁言操作")
         except Exception as e:
             logger.error(f"禁言用户失败: {e}")
-            logger.debug(f"禁言用户异常详情: {str(e)}")
 
     async def _notify_manage_group(
         self,
@@ -727,14 +877,9 @@ class ImageReviewPlugin(Star):
             is_admin: 是否为管理员/群主
         """
         try:
-            logger.debug(
-                f"开始通知管理群，群={group_id}, 用户={user_id}, 风险等级={risk_level.name}"
-            )
             manage_group_id = self._get_manage_group_id(group_id)
             if not manage_group_id:
-                logger.debug(f"群 {group_id} 未配置管理群，跳过通知")
                 return
-            logger.debug(f"管理群ID: {manage_group_id}")
 
             # 下载并保存证据图片
             evidence_path = await self._download_evidence_image(
@@ -761,7 +906,6 @@ class ImageReviewPlugin(Star):
                 else:
                     mute_str = "未开启禁言"
                 action_str = f"{recall_str}+{mute_str}"
-            logger.debug(f"处理措施: {action_str}")
 
             # 构建违规信息（新格式）
             evidence_path_str = (
@@ -780,7 +924,6 @@ class ImageReviewPlugin(Star):
                 f"风险等级: {risk_level.name}\n"
                 f"风险原因: {risk_reason}{evidence_path_str}"
             )
-            logger.debug(f"违规信息构建完成，长度: {len(violation_info)} 字符")
 
             # 构建合并转发消息
             from astrbot.api.message_components import Image, Node, Plain
@@ -791,7 +934,6 @@ class ImageReviewPlugin(Star):
             nodes.append(
                 Node(uin=int(user_id), name=user_name, content=[Plain(violation_info)])
             )
-            logger.debug("违规信息节点添加完成")
 
             # 添加违规图片节点（使用QQ图片URL，NapCat可直接下载）
             nodes.append(
@@ -799,11 +941,9 @@ class ImageReviewPlugin(Star):
                     uin=int(user_id), name=user_name, content=[Image.fromURL(image_url)]
                 )
             )
-            logger.debug("违规图片节点添加完成")
 
             # 发送到管理群
             platform_name = event.get_platform_name()
-            logger.debug(f"发送到管理群，平台: {platform_name}")
             if platform_name == "aiocqhttp":
                 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
                     AiocqhttpMessageEvent,
@@ -827,20 +967,15 @@ class ImageReviewPlugin(Star):
                                 },
                             }
                         )
-                    logger.debug(f"转发消息构建完成，共 {len(forward_msgs)} 个节点")
 
                     await client.api.call_action(
                         "send_group_forward_msg",
                         group_id=int(manage_group_id),
                         messages=forward_msgs,
                     )
-                    logger.debug("管理群通知发送成功")
-            else:
-                logger.debug(f"平台 {platform_name} 暂不支持管理群通知")
 
         except Exception as e:
             logger.error(f"通知管理群失败: {e}")
-            logger.debug(f"通知管理群异常详情: {str(e)}")
 
     def _convert_message_chain(self, chain: list) -> list:
         """
@@ -873,17 +1008,14 @@ class ImageReviewPlugin(Star):
             group_id = str(event.get_group_id()) if event.get_group_id() else None
             user_id = str(event.get_sender_id())
             user_name = event.get_sender_name()
-            logger.debug(f"收到消息: 群={group_id}, 用户={user_id}, 用户名={user_name}")
 
             # 只处理群消息
             if not group_id:
-                logger.debug("非群消息，跳过处理")
                 return
 
             # 检查是否是机器人自己发送的消息
             bot_user_id = str(event.get_self_id()) if event.get_self_id() else None
             if bot_user_id and user_id == bot_user_id:
-                logger.debug("消息来自机器人自身，跳过审核")
                 return
 
             # 缓存消息（用于违规时转发上下文）
@@ -892,12 +1024,23 @@ class ImageReviewPlugin(Star):
                 if hasattr(event.message_obj, "message_id")
                 else ""
             )
-            message_str = event.message_str
-            logger.debug(f"消息ID: {message_id}, 消息内容: {message_str[:50]}...")
 
-            # 检查是否启用了图片审核
+            # 检查是否启用了图片审核（基础配置检查）
             if not self._is_group_enabled(group_id):
-                logger.debug(f"群 {group_id} 未启用图片审核，跳过")
+                return
+
+            # 检查是否是管理员发言，更新最后管理员发言时间
+            config = self._group_config.get(group_id, {})
+            no_admin_minutes = config.get("auto_censor_no_admin_minutes", 0)
+            if no_admin_minutes > 0:
+                is_admin = await self._is_user_admin_cached(event, group_id, user_id)
+                if is_admin:
+                    self._last_admin_message_time[group_id] = datetime.now()
+                    logger.debug(f"记录管理员发言: 群{group_id}, 用户{user_id}")
+
+            # 检查是否应该开启审查
+            should_enable, reason = self._should_enable_censor(group_id)
+            if not should_enable:
                 return
 
             # 检查是否是图片消息
@@ -914,24 +1057,17 @@ class ImageReviewPlugin(Star):
 
                     # 跳过QQ官方表情包（如果开启此选项）
                     if skip_qq_emoji and self._is_qq_builtin_emoji(image_url):
-                        logger.debug(f"检测到QQ官方表情包，跳过审核: {image_url}")
                         continue
 
                     if image_url:
                         images_to_check.append((image_url, image_md5))
-                        logger.debug(
-                            f"检测到图片消息，URL: {image_url}, MD5: {image_md5}"
-                        )
 
             # 检查是否是图片消息且启用了图片审核
             if not images_to_check:
-                logger.debug("非图片消息，跳过审核")
                 return
             if not self._censor_flow:
-                logger.debug("审核流程管理器未初始化，跳过审核")
                 return
             if not self._censor_flow.is_image_censor_enabled():
-                logger.debug("图片审核未启用，跳过审核")
                 return
 
             # 获取群配置中的缓存设置
@@ -947,7 +1083,6 @@ class ImageReviewPlugin(Star):
             for image_url, image_md5 in images_to_check:
                 try:
                     # 进行图片审核
-                    logger.debug(f"开始审核图片，URL: {image_url}")
                     (
                         risk_level,
                         risk_reason,
@@ -959,13 +1094,9 @@ class ImageReviewPlugin(Star):
                         base_expire_hours=base_expire_hours,
                         max_expire_days=max_expire_days,
                     )
-                    logger.debug(
-                        f"图片审核完成，结果: 风险等级={risk_level.name}, 原因={risk_reason}, MD5={md5_hash}"
-                    )
 
                     # 处理违规
                     if risk_level in (RiskLevel.Review, RiskLevel.Block):
-                        logger.debug("检测到违规图片，开始处理")
                         await self._handle_violation(
                             event,
                             group_id,
@@ -977,22 +1108,15 @@ class ImageReviewPlugin(Star):
                             risk_reason,
                             message_id,
                         )
-                        logger.debug("违规图片处理完成")
-                    else:
-                        logger.debug("图片审核通过，无需处理")
                 except CensorError as e:
                     logger.error(f"图片审核异常: {e}")
-                    logger.debug(f"审核异常详情: {str(e)}")
                 except Exception as e:
                     logger.error(f"处理图片异常: {e}")
-                    logger.debug(f"处理图片异常详情: {str(e)}")
 
         except CensorError as e:
             logger.error(f"图片审核异常: {e}")
-            logger.debug(f"审核异常详情: {str(e)}")
         except Exception as e:
             logger.error(f"消息处理异常: {e}")
-            logger.debug(f"消息处理异常详情: {str(e)}")
 
     @filter.command("查询违规")
     async def query_violation(self, event: AstrMessageEvent, user_id_str: str = ""):
@@ -1076,9 +1200,10 @@ class ImageReviewPlugin(Star):
             status_info = "📊 图片审核插件状态\n"
             status_info += "━━━━━━━━━━━━━━━\n"
 
-            # 检查图片审核状态
+            # 检查图片审核状态（安全地处理 self._censor_flow 为 None 的情况）
             image_enabled = (
-                self._censor_flow and self._censor_flow.is_image_censor_enabled()
+                self._censor_flow is not None
+                and self._censor_flow.is_image_censor_enabled()
             )
             status_info += (
                 f"图片审核: {'✅ 已启用' if image_enabled else '❌ 未启用'}\n"
@@ -1113,10 +1238,36 @@ class ImageReviewPlugin(Star):
                     f"  └ 检测模式: {mode_str}\n"
                 )
 
-            # 检查群聊配置
-            status_info += "\n已配置的群聊:\n"
+            # 获取自动黑白名单数量
+            cache_counts = await self._db.get_cache_counts()
+            status_info += "\n📋 自动名单统计\n"
+            status_info += "━━━━━━━━━━━━━━━\n"
+            status_info += f"自动白名单: {cache_counts['whitelist']} 条\n"
+            status_info += f"自动黑名单: {cache_counts['blacklist']} 条\n"
+
+            # 检查群聊配置及审查模式
+            status_info += "\n📌 群聊审查模式\n"
+            status_info += "━━━━━━━━━━━━━━━\n"
             for gid, config in self._group_config.items():
-                status_info += f"  群 {gid} -> 管理群 {config['manage_group_id']}\n"
+                manage_gid = config["manage_group_id"]
+                if config.get("enable_auto_censor", False):
+                    # 智能审查模式
+                    schedule = config.get("auto_censor_schedule", "")
+                    no_admin_min = config.get("auto_censor_no_admin_minutes", 0)
+                    status_info += f"群 {gid}:\n"
+                    status_info += f"  └ 模式: 智能审查\n"
+                    if schedule:
+                        status_info += f"  └ 强制时段: {schedule}\n"
+                    if no_admin_min > 0:
+                        status_info += f"  └ 管理检测: {no_admin_min}分钟\n"
+                else:
+                    # 全量审查模式
+                    status_info += f"群 {gid}:\n"
+                    status_info += f"  └ 模式: 全量审查\n"
+
+                # 显示当前该群是否应该开启审查
+                should_enable, reason = self._should_enable_censor(gid)
+                status_info += f"  └ 当前状态: {'✅ 检查中' if should_enable else '⏸️ 暂停'} ({reason})\n"
 
             status_info += "━━━━━━━━━━━━━━━"
 
@@ -1165,23 +1316,17 @@ class ImageReviewPlugin(Star):
 
             # 检查是否引用了消息
             reply_info = self._extract_reply_info(event)
-            logger.debug(f"query_list_status: reply_info={reply_info}")
             if not reply_info:
                 yield event.plain_result("❌ 请引用需要查询的图片消息")
                 return
 
             message_id = reply_info.get("message_id")
-            logger.debug(f"query_list_status: message_id={message_id}")
             if not message_id:
                 yield event.plain_result("❌ 无法获取引用消息ID")
                 return
 
             # 获取被引用消息中的图片
-            logger.debug("query_list_status: 开始调用 _get_message_images")
             image_md5s = await self._get_message_images(event, message_id)
-            logger.debug(
-                f"query_list_status: _get_message_images 返回 {len(image_md5s)} 张图片"
-            )
             if not image_md5s:
                 yield event.plain_result("❌ 引用的消息中没有图片")
                 return
@@ -1305,7 +1450,6 @@ class ImageReviewPlugin(Star):
         """从回复消息中提取被引用消息的信息"""
         try:
             platform_name = event.get_platform_name()
-            logger.debug(f"_extract_reply_info: 平台={platform_name}")
 
             # aiocqhttp 平台：从 raw_message 中解析 CQ:reply
             if platform_name == "aiocqhttp":
@@ -1323,24 +1467,16 @@ class ImageReviewPlugin(Star):
                     elif hasattr(raw_message, "get"):
                         # 如果是 dict-like 对象
                         raw_message_str = raw_message.get("raw_message", "")
-                    logger.debug(
-                        f"_extract_reply_info: raw_message_str={raw_message_str}"
-                    )
                 except Exception as e:
                     logger.debug(f"_extract_reply_info: 获取 raw_message 失败: {e}")
 
                 # 备选：从 message_str 获取
                 if not raw_message_str:
                     raw_message_str = event.message_str or ""
-                    logger.debug(f"_extract_reply_info: message_str={raw_message_str}")
 
                 if raw_message_str:
                     match = re.search(r"\[CQ:reply,id=(\d+)\]", raw_message_str)
-                    logger.debug(f"_extract_reply_info: 正则匹配结果={match}")
                     if match:
-                        logger.debug(
-                            f"_extract_reply_info: 匹配成功, message_id={match.group(1)}"
-                        )
                         return {
                             "message_id": match.group(1),
                             "sender_uid": None,
@@ -1360,11 +1496,9 @@ class ImageReviewPlugin(Star):
                                 "sender_uid_str": reply_element.get("senderUidStr"),
                             }
 
-            logger.debug("_extract_reply_info: 未找到引用信息")
             return None
         except Exception as e:
             logger.debug(f"从回复消息提取信息时发生异常: {e}")
-            logger.debug(f"异常详情: {str(e)}")
             return None
 
     async def _get_message_images(
@@ -1372,12 +1506,8 @@ class ImageReviewPlugin(Star):
     ) -> list[str]:
         """获取指定消息中的所有图片MD5"""
         md5_list = []
-        logger.debug(f"_get_message_images: 方法被调用, message_id={message_id}")
         try:
             platform_name = event.get_platform_name()
-            logger.debug(
-                f"_get_message_images: 平台={platform_name}, message_id={message_id}"
-            )
 
             if platform_name == "aiocqhttp":
                 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
@@ -1387,23 +1517,13 @@ class ImageReviewPlugin(Star):
                 if isinstance(event, AiocqhttpMessageEvent):
                     client = event.bot
                     # 使用 get_msg API 获取消息内容
-                    logger.debug(
-                        f"_get_message_images: 调用 get_msg API, message_id={message_id}"
-                    )
                     result = await client.api.call_action(
                         "get_msg", message_id=int(message_id)
                     )
-                    logger.debug(f"_get_message_images: get_msg 返回结果={result}")
 
                     if result and "message" in result:
                         message_list = result["message"]
-                        logger.debug(
-                            f"_get_message_images: 消息包含 {len(message_list)} 个元素"
-                        )
                         for msg in message_list:
-                            logger.debug(
-                                f"_get_message_images: 检查消息元素 type={msg.get('type')}"
-                            )
                             if msg.get("type") == "image":
                                 data = msg.get("data", {})
                                 # 优先从 md5 字段获取
@@ -1415,30 +1535,12 @@ class ImageReviewPlugin(Star):
                                     if file_name:
                                         # 提取文件名中的 MD5 部分（去掉扩展名）
                                         md5 = file_name.split(".")[0]
-                                        logger.debug(
-                                            f"_get_message_images: 从文件名提取 md5={md5}"
-                                        )
-                                logger.debug(
-                                    f"_get_message_images: 找到图片, md5={md5}"
-                                )
                                 # 验证MD5格式
                                 if md5 and self._is_valid_md5(md5):
                                     md5_list.append(md5.lower())
-                                elif md5:
-                                    logger.debug(
-                                        f"_get_message_images: MD5格式无效，跳过: {md5}"
-                                    )
-                    else:
-                        logger.debug("_get_message_images: 返回结果中没有 message 字段")
-                else:
-                    logger.debug("_get_message_images: 事件类型不匹配")
-            else:
-                logger.debug("_get_message_images: 非 aiocqhttp 平台，跳过")
 
-            logger.debug(f"_get_message_images: 共找到 {len(md5_list)} 张图片")
         except Exception as e:
             logger.debug(f"获取消息图片失败: {e}")
-            logger.debug(f"异常详情: {str(e)}")
         return md5_list
 
     # ========== 人工白名单管理指令 ==========
