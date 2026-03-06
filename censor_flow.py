@@ -324,62 +324,53 @@ class CensorFlow:
                 logger.debug("未配置审核器，直接通过")
                 return RiskLevel.Pass, "未配置审核器", md5_hash
 
-            # 阿里云只支持URL图片
-            image_input = image_url
-            logger.debug("调用API审核图片")
-            risk_level, risk_words = await self._image_censor.detect_image(image_input)
-            risk_reason = ", ".join(risk_words) if risk_words else ""
-            logger.debug(
-                f"API审核完成，风险等级: {risk_level.name}, 原因: {risk_reason}"
-            )
+            # 确保有图片数据用于检测
+            if downloaded_image_data is None:
+                logger.debug("需要下载图片进行检测")
+                downloaded_image_data = await download_image(image_url)
 
-            # 6. 动图增强检测（如果启用且是普通图片审核通过的情况）
-            # 只对 VLAI 提供商启用动图增强检测（阿里云不支持动图多帧检测）
+            # 检测是否为动图（在线程池中执行以避免阻塞事件循环）
+            is_animated, frame_count = await asyncio.to_thread(
+                GIFCensor.is_animated_image, downloaded_image_data
+            )
+            logger.debug(f"图片检测: 是否为动图={is_animated}, 帧数={frame_count}")
+
+            # 如果是动图且启用了动图增强检测，直接使用动图检测
             if (
-                self._config.get("enable_gif_enhanced_detection", False)
+                is_animated
+                and frame_count > 1
+                and self._config.get("enable_gif_enhanced_detection", False)
                 and self._gif_censor
                 and self._config.get("image_censor_provider") == "VLAI"
-                and risk_level == RiskLevel.Pass
             ):
-                logger.debug("开始动图增强检测")
+                logger.info(f"检测到多帧动图，帧数: {frame_count}，启动动图增强检测")
                 try:
-                    # 使用已下载的图片数据进行动图检测
-                    # 如果没有预下载的数据（使用了precalculated_md5），需要下载
-                    if downloaded_image_data is None:
-                        logger.debug("预计算MD5模式，需要下载图片进行动图检测")
-                        downloaded_image_data = await download_image(image_url)
-
-                    # 检测是否为动图（在线程池中执行以避免阻塞事件循环，设置10秒超时）
-                    is_animated, frame_count = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            GIFCensor.is_animated_image, downloaded_image_data
-                        ),
-                        timeout=10.0,
+                    (
+                        risk_level,
+                        risk_reason,
+                    ) = await self._gif_censor.detect_animated_image(
+                        downloaded_image_data
                     )
-
-                    if is_animated and frame_count > 1:
-                        logger.info(
-                            f"检测到多帧动图，帧数: {frame_count}，启动增强检测"
-                        )
-                        (
-                            gif_risk_level,
-                            gif_risk_reason,
-                        ) = await self._gif_censor.detect_animated_image(
-                            downloaded_image_data
-                        )
-
-                        if gif_risk_level in (RiskLevel.Review, RiskLevel.Block):
-                            logger.warning(f"动图增强检测到违规: {gif_risk_reason}")
-                            risk_level = gif_risk_level
-                            risk_reason = f"动图检测: {gif_risk_reason}"
-                        else:
-                            logger.debug("动图增强检测通过")
-                    else:
-                        logger.debug("图片不是动图或只有单帧，跳过动图增强检测")
-
+                    logger.debug(
+                        f"动图检测完成，风险等级: {risk_level.name}, 原因: {risk_reason}"
+                    )
                 except Exception as e:
                     logger.error(f"动图增强检测异常: {e}")
-                    # 动图检测异常不影响主流程，继续返回原结果
+                    # 动图检测异常时降级为普通静图检测
+                    logger.warning("动图检测异常，降级为静图检测")
+                    is_animated = False
+
+            # 如果不是动图或动图检测未启用/失败，进行普通静图检测
+            if not is_animated or frame_count <= 1:
+                logger.debug("使用普通静图检测")
+                image_input = image_url
+                risk_level, risk_words = await self._image_censor.detect_image(
+                    image_input
+                )
+                risk_reason = ", ".join(risk_words) if risk_words else ""
+                logger.debug(
+                    f"静图检测完成，风险等级: {risk_level.name}, 原因: {risk_reason}"
+                )
 
             # 7. 根据审核结果更新自动黑白名单（如果未关闭）
             if risk_level == RiskLevel.Pass:

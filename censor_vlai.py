@@ -264,7 +264,15 @@ class VLAICensor(CensorBase):
             logger.debug("LLM 调用完成")
 
             # 解析返回结果
-            content = llm_resp.completion_text.strip()
+            # 优先使用 completion_text（结果），如果没有则使用 reasoning_content（思维链）
+            content = ""
+            if llm_resp.completion_text:
+                content = llm_resp.completion_text.strip()
+                logger.debug("使用 completion_text 作为审核结果")
+            elif hasattr(llm_resp, "reasoning_content") and llm_resp.reasoning_content:
+                content = llm_resp.reasoning_content.strip()
+                logger.debug("使用 reasoning_content 作为审核结果")
+
             logger.debug(f"VLAI 审核原始结果: {content}")
 
             # 解析结构化输出
