@@ -24,6 +24,24 @@
         "hint": "开启后将不对QQ官方表情包(如gxh.vip.qq.com域名下的表情)进行检测",
         "default": true
     },
+    "enable_forward_image_censor": {
+        "type": "bool",
+        "description": "是否启用转发消息图片检测",
+        "hint": "开启后将对合并转发消息(如群聊的合并转发消息)中的图片进行检测",
+        "default": false
+    },
+    "forward_image_sample_threshold": {
+        "type": "int",
+        "description": "转发消息图片抽检阈值",
+        "hint": "当转发消息中的图片数量超过此值时启用抽检，0表示全部检查",
+        "default": 0
+    },
+    "forward_image_sample_rate": {
+        "type": "float",
+        "description": "转发消息图片抽检率",
+        "hint": "抽检时的抽样比例，0.0-1.0之间，例如0.5表示抽检50%的图片",
+        "default": 0.5
+    },
     "disable_auto_whitelist": {
         "type": "bool",
         "description": "关闭自动白名单",
@@ -71,8 +89,16 @@
             "provider_id": {
                 "type": "string",
                 "description": "LLM 提供商 ID",
-                "hint": "可选，指定使用的 LLM 提供商 ID，留空则使用默认提供商",
-                "default": ""
+                "hint": "选择用于图片审核的 LLM 提供商，留空则使用默认提供商",
+                "default": "",
+                "_special": "select_provider"
+            },
+            "backup_provider_id": {
+                "type": "string",
+                "description": "备用 LLM 提供商 ID",
+                "hint": "主提供商不可用时使用的备用 LLM 提供商，留空则不启用备用",
+                "default": "",
+                "_special": "select_provider"
             },
             "max_image_size": {
                 "type": "int",
@@ -98,8 +124,16 @@
             "provider_id": {
                 "type": "string",
                 "description": "动图检测专用 LLM 提供商 ID",
-                "hint": "可选，指定专门用于动图多帧检测的 LLM 提供商 ID，留空则使用默认提供商。建议单独配置一个VL模型以防止并发问题",
-                "default": ""
+                "hint": "选择专门用于动图多帧检测的 LLM 提供商，建议单独配置一个VL模型以防止并发问题",
+                "default": "",
+                "_special": "select_provider"
+            },
+            "backup_provider_id": {
+                "type": "string",
+                "description": "动图检测备用 LLM 提供商 ID",
+                "hint": "主提供商不可用时使用的备用 LLM 提供商，留空则不启用备用",
+                "default": "",
+                "_special": "select_provider"
             },
             "max_image_size": {
                 "type": "int",
@@ -178,10 +212,10 @@
                         "default": 2419200
                     },
                     "mute_multiplier": {
-                        "type": "number",
+                        "type": "float",
                         "description": "禁言时长翻倍倍数",
                         "hint": "多次违规时禁言时长的翻倍倍数，支持小数如1.5，实际禁言时长会向上取整到分钟",
-                        "default": 2
+                        "default": 2.0
                     },
                     "auto_recall": {
                         "type": "bool",

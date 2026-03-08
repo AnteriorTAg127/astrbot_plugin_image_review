@@ -3,7 +3,11 @@
 图片审核插件 / An image review plugin for AstrBot
 
 [![License](https://img.shields.io/github/license/AnteriorTAg127/astrbot_plugin_image_review)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v1.2.0-blue)](metadata.yaml)
+[![Version](https://img.shields.io/badge/version-v1.3.0-blue)](metadata.yaml)
+
+> [!IMPORTANT]
+> **本代码由 AI 生成，不保证代码质量，如有问题请多提 issue。**
+
 
 > [!NOTE]
 > 这是一个为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 提供图片内容审核功能的插件。
@@ -11,6 +15,12 @@
 > [AstrBot](https://github.com/AstrBotDevs/AstrBot) 是一个支持多个主流即时通讯平台的智能助手，包括 QQ、Telegram、飞书、钉钉、Slack、Discord 等。本插件为 AstrBot 提供图片内容审核能力，帮助群管理员过滤不当图片内容。
 
 ## 更新日志
+
+### v1.3.0
+
+- **新增转发消息图片检测** - 支持检测合并转发消息中的图片内容
+- **新增抽检功能** - 转发消息图片过多时可按比例抽检，避免资源浪费
+- **配置增强** - 新增转发消息检测相关配置项
 
 ### v1.2.0
 
@@ -28,6 +38,7 @@
 
 - **双模式图片审核** - 支持阿里云内容安全 API 和 VLAI 视觉语言模型两种审核方式
 - **动图增强检测** - 对多帧图片(GIF/动图)进行增强检测，抽取多帧进行审核
+- **转发消息检测** - 支持检测合并转发消息中的图片内容，可配置抽检策略
 - **智能缓存机制** - 通过 MD5 缓存已审核图片，重复图片无需再次审核
 - **黑白名单系统** - 支持自动黑白名单和人工黑白名单，可灵活管理
 - **违规处理** - 自动撤回违规图片并禁言用户
@@ -65,8 +76,10 @@ pip install -r requirements.txt
 
 插件支持两种图片审核提供商：
 
-1. **Aliyun (阿里云)** - 基于阿里云内容安全服务，审核准确率高，需要阿里云账号
-2. **VLAI (视觉语言模型)** - 基于 AstrBot 的 AI 能力，使用视觉语言模型进行审核，无需额外账号
+1. **Aliyun (阿里云)** - 基于阿里云内容安全服务，常规图片审核误判率低，需要阿里云账号
+2. **VLAI (视觉语言模型)** - 基于 AstrBot 的 AI 能力，使用视觉语言模型进行审核，无需额外账号，不建议使用推理模型，会显著增加延迟。
+
+ **一般还是建议使用VLAI检测，尤其是冷门圈子的违规图像使用aliyun很难检测出来。但是误判率稍高，需要自己调整提示词。**
 
 ### 阿里云配置
 
@@ -92,6 +105,9 @@ VLAI 使用 AstrBot 已配置的 LLM 提供商进行图片审核：
   "enable_image_censor": true,
   "enable_gif_enhanced_detection": true,
   "skip_qq_builtin_emoji": true,
+  "enable_forward_image_censor": true,
+  "forward_image_sample_threshold": 10,
+  "forward_image_sample_rate": 0.5,
   "disable_auto_whitelist": false,
   "disable_auto_blacklist": false,
   "aliyun": {
@@ -102,11 +118,13 @@ VLAI 使用 AstrBot 已配置的 LLM 提供商进行图片审核：
   },
   "vlai": {
     "provider_id": "",
+    "backup_provider_id": "",
     "max_image_size": 640,
     "censor_prompt": "请分析这张图片是否有显著色情违规内容..."
   },
   "gif_enhanced": {
     "provider_id": "",
+    "backup_provider_id": "",
     "max_image_size": 640,
     "frame_sample_count": 3,
     "detection_mode": "separate",
@@ -143,6 +161,13 @@ VLAI 使用 AstrBot 已配置的 LLM 提供商进行图片审核：
 | `enable_image_censor` | bool | 是否启用图片审核 | `true` |
 | `enable_gif_enhanced_detection` | bool | 是否启用动图增强检测 | `false` |
 | `skip_qq_builtin_emoji` | bool | 是否跳过QQ自带表情包 | `true` |
+| `enable_forward_image_censor` | bool | 是否启用转发消息图片检测 | `false` |
+| `forward_image_sample_threshold` | int | 转发消息图片抽检阈值，0表示全部检查 | `0` |
+| `forward_image_sample_rate` | number | 转发消息图片抽检率，0.0-1.0 | `0.5` |
+| `vlai.provider_id` | string | 图片审核 LLM 提供商 | `""` |
+| `vlai.backup_provider_id` | string | 图片审核备用 LLM 提供商 | `""` |
+| `gif_enhanced.provider_id` | string | 动图检测 LLM 提供商 | `""` |
+| `gif_enhanced.backup_provider_id` | string | 动图检测备用 LLM 提供商 | `""` |
 | `disable_auto_whitelist` | bool | 关闭自动白名单机制 | `false` |
 | `disable_auto_blacklist` | bool | 关闭自动黑名单机制 | `false` |
 
@@ -160,19 +185,25 @@ VLAI 使用 AstrBot 已配置的 LLM 提供商进行图片审核：
 | 参数 | 类型 | 说明 | 默认值 |
 |------|------|------|--------|
 | `vlai.provider_id` | string | LLM 提供商 ID（留空使用默认） | `""` |
+| `vlai.backup_provider_id` | string | 备用 LLM 提供商 ID（主提供商失败时使用） | `""` |
 | `vlai.max_image_size` | int | 图片缩放最大边长(像素)，0表示不缩放 | `640` |
 | `vlai.censor_prompt` | text | 图片审核提示词 | 见默认提示词 |
+
+> **备用提供商说明**: 当主 LLM 提供商调用失败（如超时、错误等）时，会自动切换到备用提供商进行审核。如果未配置备用提供商，则直接返回错误。
 
 #### 动图增强检测配置
 
 | 参数 | 类型 | 说明 | 默认值 |
 |------|------|------|--------|
 | `gif_enhanced.provider_id` | string | 动图检测专用 LLM 提供商 ID | `""` |
+| `gif_enhanced.backup_provider_id` | string | 动图检测备用 LLM 提供商 ID | `""` |
 | `gif_enhanced.max_image_size` | int | 动图帧缩放最大边长(像素) | `640` |
 | `gif_enhanced.frame_sample_count` | int | 采样帧数，建议3-5帧 | `3` |
 | `gif_enhanced.detection_mode` | string | 检测模式 (`separate`逐帧/`batch`批量) | `separate` |
 | `gif_enhanced.censor_prompt` | text | 逐帧检查模式提示词 | 见默认提示词 |
 | `gif_enhanced.batch_censor_prompt` | text | 批量检查模式提示词 | 见默认提示词 |
+
+> **备用提供商说明**: 动图检测同样支持备用提供商机制，当主提供商失败时会自动切换到备用提供商。
 
 #### 群聊配置
 
@@ -279,6 +310,74 @@ VLAI 使用 AstrBot 已配置的 LLM 提供商进行图片审核：
 
 > **注意**：跨天时间格式也支持，如 `22:00-08:00` 表示晚上22点到次日8点
 
+### 转发消息图片检测
+
+插件支持检测合并转发消息（如群聊的合并转发消息）中的图片内容。
+
+#### 抽检机制
+
+当转发消息中包含大量图片时，可以启用抽检功能以节省资源：
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│              转发消息图片检测开关 (enable_forward_image_censor)│
+└─────────────────────────────────────────────────────────────┘
+                              │
+              ┌───────────────┴───────────────┐
+              ▼                               ▼
+       ┌─────────────┐                 ┌─────────────┐
+       │    关闭      │                 │    开启     │
+       │  不检测转发  │                 │  检测转发   │
+       └─────────────┘                 └─────────────┘
+                                                │
+                                                ▼
+                              ┌─────────────────────────────────┐
+                              │   转发消息图片数量 vs 阈值       │
+                              │   (forward_image_sample_threshold)│
+                              └─────────────────────────────────┘
+                                                │
+                    ┌───────────────────────────┴───────────────────────────┐
+                    ▼                                                       ▼
+            ┌───────────────┐                                       ┌───────────────┐
+            │  数量 ≤ 阈值   │                                       │  数量 > 阈值   │
+            │  (或阈值为0)   │                                       │               │
+            └───────────────┘                                       └───────────────┘
+                    │                                                       │
+                    ▼                                                       ▼
+            ┌───────────────┐                                       ┌───────────────┐
+            │   全部检查     │                                       │   按比例抽检   │
+            │               │                                       │  (sample_rate) │
+            └───────────────┘                                       └───────────────┘
+```
+
+#### 转发消息检测配置示例
+
+**场景1：全部检查（严格模式）**
+
+```json
+{
+  "enable_forward_image_censor": true,
+  "forward_image_sample_threshold": 0,
+  "forward_image_sample_rate": 0.5
+}
+```
+
+**效果**：转发消息中的所有图片都会被检测。
+
+**场景2：抽检模式（节省资源）**
+
+```json
+{
+  "enable_forward_image_censor": true,
+  "forward_image_sample_threshold": 10,
+  "forward_image_sample_rate": 0.3
+}
+```
+
+**效果**：
+- 转发消息中图片 ≤ 10 张：全部检查
+- 转发消息中图片 > 10 张：抽检 30% 的图片
+
 ## 使用说明
 
 ### 帮助命令
@@ -332,6 +431,8 @@ VLAI 使用 AstrBot 已配置的 LLM 提供商进行图片审核：
 
 ## 工作流程
 
+### 普通图片消息
+
 ```
 收到图片消息
     │
@@ -357,6 +458,32 @@ VLAI 使用 AstrBot 已配置的 LLM 提供商进行图片审核：
 根据审核结果：
 ├── 通过 ──▶ 加入自动白名单
 └── 复查/拦截 ──▶ 加入自动黑名单 + 禁言 + 通知管理群
+```
+
+### 转发消息图片
+
+```
+收到转发消息
+    │
+    ▼
+提取转发消息中的所有图片
+    │
+    ▼
+图片数量超过阈值？
+    │
+    ├── 否 ──▶ 全部检查
+    │
+    └── 是 ──▶ 按比例抽检
+                    │
+                    ▼
+            对选中的图片进行审核
+                    │
+                    ▼
+            发现违规图片？
+                │
+                ├── 否 ──▶ 正常处理
+                │
+                └── 是 ──▶ 按违规处理（禁言 + 通知管理群）
 ```
 
 ## 黑白名单说明

@@ -6,6 +6,7 @@
 import asyncio
 import math
 import os
+import random
 import re
 from datetime import datetime, timedelta
 from typing import Any
@@ -57,7 +58,7 @@ def _sanitize_filename(filename: str) -> str:
     "image_review",
     "AnteriorTAg127",
     "图片审核插件，提供图片内容审核、违规处理、管理群通知等功能",
-    "1.2.0",
+    "1.3.0",
 )
 class ImageReviewPlugin(Star):
     """图片审核插件主类"""
@@ -589,6 +590,119 @@ class ImageReviewPlugin(Star):
 
         return False
 
+    async def _extract_forward_images(
+        self, event: AstrMessageEvent, forward_id: str
+    ) -> list[dict]:
+        """
+        从转发消息中提取所有图片
+
+        Args:
+            event: 消息事件
+            forward_id: 转发消息ID
+
+        Returns:
+            图片信息列表，每个元素包含 url 和 md5
+        """
+        images = []
+        try:
+            platform_name = event.get_platform_name()
+            if platform_name == "aiocqhttp":
+                from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
+                    AiocqhttpMessageEvent,
+                )
+
+                if isinstance(event, AiocqhttpMessageEvent):
+                    client = event.bot
+                    # 使用 get_forward_msg API 获取转发消息内容
+                    result = await client.api.call_action(
+                        "get_forward_msg",
+                        id=forward_id,
+                    )
+
+                    if result and "messages" in result:
+                        messages = result["messages"]
+                        for msg in messages:
+                            if "message" in msg:
+                                msg_content = msg["message"]
+                                # 处理消息内容（可能是列表或字符串）
+                                if isinstance(msg_content, list):
+                                    for item in msg_content:
+                                        if (
+                                            isinstance(item, dict)
+                                            and item.get("type") == "image"
+                                        ):
+                                            data = item.get("data", {})
+                                            image_url = data.get("url", "")
+                                            # 从 file 字段提取 MD5
+                                            file_name = data.get("file", "")
+                                            md5_hex = (
+                                                file_name.split(".")[0]
+                                                if file_name
+                                                else ""
+                                            )
+                                            if image_url and self._is_valid_md5(
+                                                md5_hex
+                                            ):
+                                                images.append(
+                                                    {
+                                                        "url": image_url,
+                                                        "md5": md5_hex.lower(),
+                                                    }
+                                                )
+                                elif isinstance(msg_content, str):
+                                    # 处理 CQ 码格式的消息
+                                    # 提取所有图片 CQ 码
+                                    cq_image_matches = re.findall(
+                                        r"\[CQ:image,([^\]]+)\]",
+                                        msg_content,
+                                    )
+                                    for cq_params in cq_image_matches:
+                                        # 从每个图片 CQ 码中提取 url 和 file
+                                        url_match = re.search(
+                                            r"url=([^,\]]+)", cq_params
+                                        )
+                                        file_match = re.search(
+                                            r"file=([^,\]]+)", cq_params
+                                        )
+                                        if url_match and file_match:
+                                            image_url = url_match.group(1)
+                                            file_name = file_match.group(1)
+                                            md5_hex = file_name.split(".")[0]
+                                            if self._is_valid_md5(md5_hex):
+                                                images.append(
+                                                    {
+                                                        "url": image_url,
+                                                        "md5": md5_hex.lower(),
+                                                    }
+                                                )
+
+        except Exception as e:
+            logger.debug(f"提取转发消息图片失败: {e}")
+
+        return images
+
+    def _sample_images(
+        self, images: list[dict], threshold: int, sample_rate: float
+    ) -> list[dict]:
+        """
+        对图片进行抽检
+
+        Args:
+            images: 原始图片列表
+            threshold: 抽检阈值，超过此数量才进行抽检
+            sample_rate: 抽检率，0.0-1.0
+
+        Returns:
+            抽检后的图片列表
+        """
+        if threshold == 0 or len(images) <= threshold:
+            # 阈值为0或图片数量未超过阈值，全部检查
+            return images
+
+        # 超过阈值，进行抽检
+        sample_count = max(1, int(len(images) * sample_rate))
+        return random.sample(images, min(sample_count, len(images)))
+
     async def _is_user_admin(
         self, event: AstrMessageEvent, group_id: str, user_id: str
     ) -> bool:
@@ -1046,9 +1160,17 @@ class ImageReviewPlugin(Star):
             # 检查是否是图片消息
             message_chain = event.get_messages()
             images_to_check = []
+            forward_images = []
 
             # 检查是否跳过QQ自带表情包
             skip_qq_emoji = self._config.get("skip_qq_builtin_emoji", True)
+
+            # 检查是否启用转发消息图片检测
+            enable_forward_censor = self._config.get(
+                "enable_forward_image_censor", False
+            )
+            forward_threshold = self._config.get("forward_image_sample_threshold", 0)
+            forward_sample_rate = self._config.get("forward_image_sample_rate", 0.5)
 
             for comp in message_chain:
                 if isinstance(comp, Comp.Image):
@@ -1056,6 +1178,40 @@ class ImageReviewPlugin(Star):
                     image_md5 = self._extract_image_md5(event, comp)
 
                     # 跳过QQ官方表情包（如果开启此选项）
+                    if skip_qq_emoji and self._is_qq_builtin_emoji(image_url):
+                        continue
+
+                    if image_url:
+                        images_to_check.append((image_url, image_md5))
+                elif isinstance(comp, Comp.Forward) and enable_forward_censor:
+                    # 提取转发消息中的图片
+                    forward_id = getattr(comp, "id", None)
+                    if forward_id:
+                        forward_imgs = await self._extract_forward_images(
+                            event, forward_id
+                        )
+                        if forward_imgs:
+                            forward_images.extend(forward_imgs)
+
+            # 处理转发消息图片（如果启用）
+            if forward_images:
+                original_count = len(forward_images)
+                # 应用抽检逻辑
+                sampled_images = self._sample_images(
+                    forward_images, forward_threshold, forward_sample_rate
+                )
+                sampled_count = len(sampled_images)
+
+                if sampled_count < original_count:
+                    logger.info(
+                        f"转发消息图片抽检: 原图{original_count}张，抽检{sampled_count}张"
+                    )
+
+                for img_info in sampled_images:
+                    image_url = img_info.get("url", "")
+                    image_md5 = img_info.get("md5", "")
+
+                    # 跳过QQ官方表情包
                     if skip_qq_emoji and self._is_qq_builtin_emoji(image_url):
                         continue
 
@@ -1237,6 +1393,21 @@ class ImageReviewPlugin(Star):
                     f"  └ 采样帧数: {frame_count}\n"
                     f"  └ 检测模式: {mode_str}\n"
                 )
+
+            # 显示转发消息图片检测配置
+            forward_enabled = self._config.get("enable_forward_image_censor", False)
+            status_info += (
+                f"转发消息检测: {'✅ 已启用' if forward_enabled else '❌ 未启用'}\n"
+            )
+            if forward_enabled:
+                forward_threshold = self._config.get(
+                    "forward_image_sample_threshold", 0
+                )
+                forward_sample_rate = self._config.get("forward_image_sample_rate", 0.5)
+                if forward_threshold == 0:
+                    status_info += "  └ 抽检设置: 全部检查\n"
+                else:
+                    status_info += f"  └ 抽检设置: 超过{forward_threshold}张时抽检{int(forward_sample_rate * 100)}%\n"
 
             # 获取自动黑白名单数量
             cache_counts = await self._db.get_cache_counts()
@@ -1983,6 +2154,13 @@ class ImageReviewPlugin(Star):
                 "• 检测模式:\n"
                 "  - separate: 逐帧分开检查（多次调用，更精确）\n"
                 "  - batch: 多帧合并检查（单次调用，更省token）\n"
+                "\n"
+                "【转发消息检测说明】\n"
+                "━━━━━━━━━━━━━━━\n"
+                "• 开启后可检测合并转发消息中的图片\n"
+                "• 支持抽检功能，图片过多时可按比例抽检\n"
+                "• 抽检阈值设为0表示全部检查\n"
+                "• 转发消息中的违规图片会触发同样的处理\n"
                 "\n"
                 "【说明】\n"
                 "━━━━━━━━━━━━━━━\n"

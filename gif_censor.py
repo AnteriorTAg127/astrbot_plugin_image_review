@@ -37,11 +37,13 @@ class GIFCensor:
         self._context = context
         self._vl_censor = vl_censor
         self._provider_id = config.get("provider_id", "")
+        self._backup_provider_id = config.get("backup_provider_id", "")
         self._max_image_size = config.get("max_image_size", 640)
         self._frame_sample_count = config.get("frame_sample_count", 3)
         self._detection_mode = config.get("detection_mode", "separate")
         logger.debug(
             f"GIFCensor 初始化: provider_id={self._provider_id}, "
+            f"backup_provider_id={self._backup_provider_id}, "
             f"max_image_size={self._max_image_size}, "
             f"frame_sample_count={self._frame_sample_count}, "
             f"detection_mode={self._detection_mode}"
@@ -289,14 +291,55 @@ class GIFCensor:
 
                 logger.debug(f"开始检测第 {i + 1}/{len(frames)} 帧")
 
-                # 调用 LLM 进行检测，设置30秒超时
-                llm_resp = await asyncio.wait_for(
-                    self._context.llm_generate(
-                        chat_provider_id=provider_id,
-                        contexts=[user_msg],
-                    ),
-                    timeout=30.0,
-                )
+                # 先尝试使用主提供商
+                try:
+                    llm_resp = await asyncio.wait_for(
+                        self._context.llm_generate(
+                            chat_provider_id=provider_id,
+                            contexts=[user_msg],
+                        ),
+                        timeout=30.0,
+                    )
+                    logger.debug(f"第 {i + 1} 帧主提供商调用完成")
+                except Exception as primary_error:
+                    # 主提供商失败，尝试备用提供商
+                    if self._backup_provider_id:
+                        logger.warning(
+                            f"第 {i + 1} 帧主提供商调用失败: {primary_error}，尝试备用提供商: {self._backup_provider_id}"
+                        )
+                        try:
+                            llm_resp = await asyncio.wait_for(
+                                self._context.llm_generate(
+                                    chat_provider_id=self._backup_provider_id,
+                                    contexts=[user_msg],
+                                ),
+                                timeout=30.0,
+                            )
+                            logger.debug(f"第 {i + 1} 帧备用提供商调用完成")
+                        except Exception as backup_error:
+                            logger.error(
+                                f"第 {i + 1} 帧备用提供商也调用失败: {backup_error}"
+                            )
+                            # 主备都失败，标记为复审级别
+                            all_violations.append(
+                                {
+                                    "frame": i + 1,
+                                    "level": RiskLevel.Review,
+                                    "reason": f"检测失败: {backup_error}",
+                                }
+                            )
+                            continue
+                    else:
+                        # 没有配置备用提供商，标记为复审级别
+                        logger.error(f"第 {i + 1} 帧检测失败: {primary_error}")
+                        all_violations.append(
+                            {
+                                "frame": i + 1,
+                                "level": RiskLevel.Review,
+                                "reason": f"检测失败: {primary_error}",
+                            }
+                        )
+                        continue
 
                 # 解析结果
                 # 优先使用 completion_text（结果），如果没有则使用 reasoning_content（思维链）
@@ -320,9 +363,21 @@ class GIFCensor:
 
             except asyncio.TimeoutError:
                 logger.error(f"第 {i + 1} 帧检测超时")
+                # 超时标记为复审级别
+                all_violations.append(
+                    {"frame": i + 1, "level": RiskLevel.Review, "reason": "检测超时"}
+                )
                 continue
             except Exception as e:
                 logger.error(f"第 {i + 1} 帧检测异常: {e}")
+                # 异常标记为复审级别
+                all_violations.append(
+                    {
+                        "frame": i + 1,
+                        "level": RiskLevel.Review,
+                        "reason": f"检测异常: {e}",
+                    }
+                )
                 continue
 
         return self._aggregate_results(all_violations, len(frames))
@@ -366,14 +421,40 @@ class GIFCensor:
 
             logger.debug("开始批量检测所有帧")
 
-            # 调用 LLM 进行检测，设置60秒超时（因为帧数较多）
-            llm_resp = await asyncio.wait_for(
-                self._context.llm_generate(
-                    chat_provider_id=provider_id,
-                    contexts=[user_msg],
-                ),
-                timeout=60.0,
-            )
+            # 先尝试使用主提供商
+            try:
+                llm_resp = await asyncio.wait_for(
+                    self._context.llm_generate(
+                        chat_provider_id=provider_id,
+                        contexts=[user_msg],
+                    ),
+                    timeout=60.0,
+                )
+                logger.debug("批量检测主提供商调用完成")
+            except Exception as primary_error:
+                # 主提供商失败，尝试备用提供商
+                if self._backup_provider_id:
+                    logger.warning(
+                        f"批量检测主提供商调用失败: {primary_error}，尝试备用提供商: {self._backup_provider_id}"
+                    )
+                    try:
+                        llm_resp = await asyncio.wait_for(
+                            self._context.llm_generate(
+                                chat_provider_id=self._backup_provider_id,
+                                contexts=[user_msg],
+                            ),
+                            timeout=60.0,
+                        )
+                        logger.debug("批量检测备用提供商调用完成")
+                    except Exception as backup_error:
+                        logger.error(f"批量检测备用提供商也调用失败: {backup_error}")
+                        # 降级为逐帧检测
+                        logger.warning("批量检测失败，降级为逐帧检测")
+                        return await self._detect_separate(frames)
+                else:
+                    # 没有配置备用提供商，降级为逐帧检测
+                    logger.warning(f"批量检测失败，降级为逐帧检测: {primary_error}")
+                    return await self._detect_separate(frames)
 
             # 解析结果
             # 优先使用 completion_text（结果），如果没有则使用 reasoning_content（思维链）

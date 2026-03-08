@@ -86,6 +86,7 @@ class VLAICensor(CensorBase):
         super().__init__(config)
         self._context = context
         self._provider_id = config.get("provider_id", "")
+        self._backup_provider_id = config.get("backup_provider_id", "")
         self._max_image_size = config.get("max_image_size", 640)
         self._censor_prompt = config.get("censor_prompt", self.DEFAULT_CENSOR_PROMPT)
 
@@ -247,21 +248,45 @@ class VLAICensor(CensorBase):
                     TextPart(text=self._censor_prompt),
                 ]
             )
+
+            # 先尝试使用主提供商
+            provider_id = self._provider_id if self._provider_id else None
             logger.debug(
-                f"多模态消息构建完成，使用提供商: {self._provider_id if self._provider_id else '默认'}"
+                f"开始调用 LLM 进行图片审核，主提供商: {provider_id if provider_id else '默认'}"
             )
 
-            # 调用 AstrBot AI 接口，设置30秒超时
-            provider_id = self._provider_id if self._provider_id else None
-            logger.debug("开始调用 LLM 进行图片审核...")
-            llm_resp = await asyncio.wait_for(
-                self._context.llm_generate(
-                    chat_provider_id=provider_id,
-                    contexts=[user_msg],
-                ),
-                timeout=30.0,
-            )
-            logger.debug("LLM 调用完成")
+            try:
+                llm_resp = await asyncio.wait_for(
+                    self._context.llm_generate(
+                        chat_provider_id=provider_id,
+                        contexts=[user_msg],
+                    ),
+                    timeout=30.0,
+                )
+                logger.debug("主提供商 LLM 调用完成")
+            except Exception as primary_error:
+                # 主提供商失败，尝试备用提供商
+                if self._backup_provider_id:
+                    logger.warning(
+                        f"主提供商调用失败: {primary_error}，尝试使用备用提供商: {self._backup_provider_id}"
+                    )
+                    try:
+                        llm_resp = await asyncio.wait_for(
+                            self._context.llm_generate(
+                                chat_provider_id=self._backup_provider_id,
+                                contexts=[user_msg],
+                            ),
+                            timeout=30.0,
+                        )
+                        logger.debug("备用提供商 LLM 调用完成")
+                    except Exception as backup_error:
+                        logger.error(f"备用提供商也调用失败: {backup_error}")
+                        raise CensorError(
+                            f"主提供商和备用提供商均调用失败: 主错误={primary_error}, 备用错误={backup_error}"
+                        )
+                else:
+                    # 没有配置备用提供商，直接抛出原错误
+                    raise
 
             # 解析返回结果
             # 优先使用 completion_text（结果），如果没有则使用 reasoning_content（思维链）
