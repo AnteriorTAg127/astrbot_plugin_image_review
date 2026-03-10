@@ -3,10 +3,10 @@
 图片审核插件 / An image review plugin for AstrBot
 
 [![License](https://img.shields.io/github/license/AnteriorTAg127/astrbot_plugin_image_review)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v1.3.0-blue)](metadata.yaml)
+[![Version](https://img.shields.io/badge/version-v1.3.5-blue)](metadata.yaml)
 
 > [!IMPORTANT]
-> **本代码由 AI 生成，不保证代码质量，如有问题请多提 issue。**
+> **本代码由 AI 生成，不保证代码质量，如有问题请多提 issues。**
 
 
 > [!NOTE]
@@ -15,6 +15,12 @@
 > [AstrBot](https://github.com/AstrBotDevs/AstrBot) 是一个支持多个主流即时通讯平台的智能助手，包括 QQ、Telegram、飞书、钉钉、Slack、Discord 等。本插件为 AstrBot 提供图片内容审核能力，帮助群管理员过滤不当图片内容。
 
 ## 更新日志
+
+### v1.3.5
+
+- **新增管理命令权限验证** - 可配置是否要求管理员/群主身份才能执行敏感命令，增强安全性
+- **优化图片下载流程** - 减少重复下载，优化资源使用
+- **修复动图检测耦合问题** - 动图增强检测现在仅在 VLAI 提供商下生效，避免逻辑混乱
 
 ### v1.3.0
 
@@ -83,7 +89,7 @@ pip install -r requirements.txt
 
 ### 阿里云配置
 
-1. 登录 [阿里云内容安全控制台](https://content-safety.console.aliyun.com/)
+1. 登录 [阿里云内容安全控制台](https://yundun.console.aliyun.com/)
 2. 开通内容安全服务
 3. 创建 AccessKey，获取 KeyId 和 KeySecret
 
@@ -159,11 +165,12 @@ VLAI 使用 AstrBot 已配置的 LLM 提供商进行图片审核：
 |------|------|------|--------|
 | `image_censor_provider` | string | 图片审核提供商 (`Aliyun` 或 `VLAI`) | `Aliyun` |
 | `enable_image_censor` | bool | 是否启用图片审核 | `true` |
-| `enable_gif_enhanced_detection` | bool | 是否启用动图增强检测 | `false` |
+| `enable_gif_enhanced_detection` | bool | 是否启用动图增强检测（仅 VLAI 提供商生效） | `false` |
 | `skip_qq_builtin_emoji` | bool | 是否跳过QQ自带表情包 | `true` |
 | `enable_forward_image_censor` | bool | 是否启用转发消息图片检测 | `false` |
 | `forward_image_sample_threshold` | int | 转发消息图片抽检阈值，0表示全部检查 | `0` |
 | `forward_image_sample_rate` | number | 转发消息图片抽检率，0.0-1.0 | `0.5` |
+| `enable_admin_permission_check` | bool | 是否开启管理命令权限验证 | `false` |
 | `vlai.provider_id` | string | 图片审核 LLM 提供商 | `""` |
 | `vlai.backup_provider_id` | string | 图片审核备用 LLM 提供商 | `""` |
 | `gif_enhanced.provider_id` | string | 动图检测 LLM 提供商 | `""` |

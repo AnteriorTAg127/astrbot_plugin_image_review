@@ -14,8 +14,8 @@ from PIL import Image
 from astrbot.api import logger
 from astrbot.core.agent.message import ImageURLPart, TextPart, UserMessageSegment
 
+from ..database import RiskLevel
 from .censor_base import CensorBase, CensorError
-from .database import RiskLevel
 
 
 class VLAICensor(CensorBase):
@@ -200,12 +200,13 @@ class VLAICensor(CensorBase):
         # VLAI 主要用于图片审核，文本审核返回通过
         return RiskLevel.Pass, set()
 
-    async def detect_image(self, image: str) -> tuple[RiskLevel, set[str]]:
+    async def detect_image(self, image: str, image_data: bytes | None = None) -> tuple[RiskLevel, set[str]]:
         """
         检测图片内容
 
         Args:
             image: 图片URL或base64字符串
+            image_data: 已下载的图片数据（可选，如果提供则跳过下载）
 
         Returns:
             (风险等级, 风险描述集合)
@@ -217,11 +218,13 @@ class VLAICensor(CensorBase):
         try:
             # 获取图片数据
             if image.startswith("http"):
-                logger.debug(f"从 URL 下载图片: {image[:80]}...")
-                # 下载图片
-                from .censor_flow import download_image
+                if image_data is None:
+                    logger.debug(f"从 URL 下载图片: {image[:80]}...")
+                    from .censor_flow import download_image
 
-                image_data = await download_image(image)
+                    image_data = await download_image(image)
+                else:
+                    logger.debug(f"使用已下载的图片数据，大小: {len(image_data)} bytes")
                 logger.debug(f"图片下载完成，大小: {len(image_data)} bytes")
                 # 使用线程池执行同步的图片处理操作，避免阻塞事件循环
                 base64_data, mime_type = await asyncio.to_thread(

@@ -50,12 +50,13 @@ class CensorBase(ABC):
         pass
 
     @abstractmethod
-    async def detect_image(self, image: str) -> tuple[RiskLevel, set[str]]:
+    async def detect_image(self, image: str, image_data: bytes | None = None) -> tuple[RiskLevel, set[str]]:
         """
         检测图片内容
 
         Args:
             image: 图片URL或base64字符串
+            image_data: 已下载的图片数据（可选，如果提供则跳过下载）
 
         Returns:
             (风险等级, 风险描述集合)

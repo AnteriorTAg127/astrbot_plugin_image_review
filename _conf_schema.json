@@ -1,4 +1,10 @@
 {
+    "enable_admin_permission_check": {
+        "type": "bool",
+        "description": "是否开启管理命令权限验证",
+        "hint": "开启后，在管理群内只有管理员/群主才能执行敏感命令（如添加白名单、清除缓存等），关闭则任何群成员都可以执行",
+        "default": false
+    },
     "image_censor_provider": {
         "type": "string",
         "description": "图片审核提供商",

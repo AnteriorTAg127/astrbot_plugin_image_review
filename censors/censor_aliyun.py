@@ -14,8 +14,8 @@ from alibabacloud_green20220302.client import Client
 from alibabacloud_tea_openapi.models import Config
 from alibabacloud_tea_util import models as util_models
 
+from ..database import RiskLevel
 from .censor_base import CensorBase, CensorError
-from .database import RiskLevel
 
 
 class AliyunCensor(CensorBase):
@@ -53,9 +53,9 @@ class AliyunCensor(CensorBase):
         if self._session:
             await self._session.close()
             self._session = None
-        # 关闭线程池 - 使用 wait=True 确保任务完成，避免资源泄露
+        # 关闭线程池 - 使用 wait=False 避免阻塞事件循环
         if self._executor:
-            self._executor.shutdown(wait=True)
+            self._executor.shutdown(wait=False)
             self._executor = None
 
     async def detect_text(self, text: str) -> tuple[RiskLevel, set[str]]:
@@ -155,12 +155,13 @@ class AliyunCensor(CensorBase):
         except Exception as e:
             raise CensorError(f"阿里云文本审核请求失败: {e}")
 
-    async def detect_image(self, image: str) -> tuple[RiskLevel, set[str]]:
+    async def detect_image(self, image: str, image_data: bytes | None = None) -> tuple[RiskLevel, set[str]]:
         """
         对图片进行内容审核
 
         Args:
             image: 图片URL或base64字符串
+            image_data: 已下载的图片数据（可选，阿里云不需要此参数）
 
         Returns:
             (风险等级, 风险描述集合)

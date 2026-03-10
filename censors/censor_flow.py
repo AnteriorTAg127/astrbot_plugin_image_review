@@ -11,10 +11,10 @@ import aiohttp
 
 from astrbot.api import logger
 
+from ..database import DatabaseManager, RiskLevel
 from .censor_aliyun import AliyunCensor
 from .censor_base import CensorBase, CensorError
 from .censor_vlai import VLAICensor
-from .database import DatabaseManager, RiskLevel
 from .gif_censor import GIFCensor
 
 # 单例会话管理
@@ -204,13 +204,19 @@ class CensorFlow:
         else:
             logger.debug(f"未知的审核提供商: {image_provider}")
 
-        # 初始化动图检测器（如果启用）
-        if self._config.get("enable_gif_enhanced_detection", False) and self._context:
-            logger.debug("开始初始化动图增强检测器")
+        # 初始化动图检测器（如果启用且使用VLAI提供商）
+        if (
+            self._config.get("enable_gif_enhanced_detection", False)
+            and self._context
+            and self._config.get("image_censor_provider") == "VLAI"
+        ):
+            logger.debug("开始初始化动图增强检测器（VLAI提供商）")
             gif_config = self._config.get("gif_enhanced", {})
             logger.debug(f"动图检测配置: {gif_config}")
             self._gif_censor = GIFCensor(gif_config, self._context, self._image_censor)
             logger.debug("动图增强检测器初始化完成")
+        elif self._config.get("enable_gif_enhanced_detection", False):
+            logger.debug("动图增强检测已启用，但当前审核提供商不是VLAI，跳过初始化")
 
     async def close(self):
         """关闭资源"""
@@ -234,7 +240,7 @@ class CensorFlow:
         precalculated_md5: str | None = None,
         base_expire_hours: int | None = None,
         max_expire_days: int | None = None,
-    ) -> tuple[RiskLevel, str, str | None]:
+    ) -> tuple[RiskLevel, str, str | None, bytes | None]:
         """
         提交图片进行审核
 
@@ -246,7 +252,7 @@ class CensorFlow:
             max_expire_days: 最大缓存周期（天），覆盖全局默认值
 
         Returns:
-            (风险等级, 风险原因, 图片MD5)
+            (风险等级, 风险原因, 图片MD5, 下载的图片数据)
         """
         import logging
 
@@ -283,7 +289,7 @@ class CensorFlow:
             logger.debug("检查人工白名单")
             if await self._db.check_manual_whitelist(md5_hash):
                 logger.debug(f"图片在人工白名单中，MD5: {md5_hash}")
-                return RiskLevel.Pass, "人工白名单图片", md5_hash
+                return RiskLevel.Pass, "人工白名单图片", md5_hash, downloaded_image_data
 
             # 2. 检查人工黑名单（最高优先级）
             logger.debug("检查人工黑名单")
@@ -293,7 +299,7 @@ class CensorFlow:
                 logger.debug(
                     f"图片在人工黑名单中，风险等级: {risk_level.name}, 原因: {risk_reason}"
                 )
-                return risk_level, f"人工黑名单图片: {risk_reason}", md5_hash
+                return risk_level, f"人工黑名单图片: {risk_reason}", md5_hash, downloaded_image_data
 
             # 3. 检查自动白名单（如果未关闭）
             disable_auto_whitelist = self._config.get("disable_auto_whitelist", False)
@@ -301,7 +307,7 @@ class CensorFlow:
                 logger.debug("检查自动白名单")
                 if await self._db.check_whitelist(md5_hash):
                     logger.debug(f"图片在自动白名单中，MD5: {md5_hash}")
-                    return RiskLevel.Pass, "白名单图片", md5_hash
+                    return RiskLevel.Pass, "白名单图片", md5_hash, downloaded_image_data
             else:
                 logger.debug("自动白名单已禁用，跳过检查")
 
@@ -315,14 +321,14 @@ class CensorFlow:
                     logger.debug(
                         f"图片在黑名单中，风险等级: {risk_level.name}, 原因: {risk_reason}"
                     )
-                    return risk_level, f"黑名单图片: {risk_reason}", md5_hash
+                    return risk_level, f"黑名单图片: {risk_reason}", md5_hash, downloaded_image_data
             else:
                 logger.debug("自动黑名单已禁用，跳过检查")
 
             # 5. 调用API审核
             if not self._image_censor:
                 logger.debug("未配置审核器，直接通过")
-                return RiskLevel.Pass, "未配置审核器", md5_hash
+                return RiskLevel.Pass, "未配置审核器", md5_hash, downloaded_image_data
 
             # 确保有图片数据用于检测
             if downloaded_image_data is None:
@@ -365,7 +371,7 @@ class CensorFlow:
                 logger.debug("使用普通静图检测")
                 image_input = image_url
                 risk_level, risk_words = await self._image_censor.detect_image(
-                    image_input
+                    image_input, downloaded_image_data
                 )
                 risk_reason = ", ".join(risk_words) if risk_words else ""
                 logger.debug(
@@ -403,7 +409,7 @@ class CensorFlow:
             logger.debug(
                 f"图片审核流程完成，最终结果: 风险等级={risk_level.name}, 原因={risk_reason}, MD5={md5_hash}"
             )
-            return risk_level, risk_reason, md5_hash
+            return risk_level, risk_reason, md5_hash, downloaded_image_data
 
         except Exception as e:
             logger.debug(f"图片审核流程异常: {e}")
