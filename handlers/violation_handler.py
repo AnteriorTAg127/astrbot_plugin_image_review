@@ -353,7 +353,11 @@ class ViolationHandler:
             logger.error(f"通知管理群失败: {e}")
 
     async def _download_evidence_image(
-        self, image_url: str, group_id: str, user_id: str, image_data: bytes | None = None
+        self,
+        image_url: str,
+        group_id: str,
+        user_id: str,
+        image_data: bytes | None = None,
     ) -> str | None:
         """
         下载并保存违规证据图片
@@ -370,6 +374,7 @@ class ViolationHandler:
         try:
             if image_data is None:
                 from ..censors import download_image
+
                 image_data = await download_image(image_url)
 
             md5_hash = hashlib.md5(image_data).hexdigest()

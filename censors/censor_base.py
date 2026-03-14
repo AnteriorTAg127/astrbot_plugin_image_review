@@ -50,7 +50,9 @@ class CensorBase(ABC):
         pass
 
     @abstractmethod
-    async def detect_image(self, image: str, image_data: bytes | None = None) -> tuple[RiskLevel, set[str]]:
+    async def detect_image(
+        self, image: str, image_data: bytes | None = None
+    ) -> tuple[RiskLevel, set[str]]:
         """
         检测图片内容
 

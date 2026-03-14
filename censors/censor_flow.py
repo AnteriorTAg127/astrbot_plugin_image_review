@@ -299,7 +299,12 @@ class CensorFlow:
                 logger.debug(
                     f"图片在人工黑名单中，风险等级: {risk_level.name}, 原因: {risk_reason}"
                 )
-                return risk_level, f"人工黑名单图片: {risk_reason}", md5_hash, downloaded_image_data
+                return (
+                    risk_level,
+                    f"人工黑名单图片: {risk_reason}",
+                    md5_hash,
+                    downloaded_image_data,
+                )
 
             # 3. 检查自动白名单（如果未关闭）
             disable_auto_whitelist = self._config.get("disable_auto_whitelist", False)
@@ -321,7 +326,12 @@ class CensorFlow:
                     logger.debug(
                         f"图片在黑名单中，风险等级: {risk_level.name}, 原因: {risk_reason}"
                     )
-                    return risk_level, f"黑名单图片: {risk_reason}", md5_hash, downloaded_image_data
+                    return (
+                        risk_level,
+                        f"黑名单图片: {risk_reason}",
+                        md5_hash,
+                        downloaded_image_data,
+                    )
             else:
                 logger.debug("自动黑名单已禁用，跳过检查")
 

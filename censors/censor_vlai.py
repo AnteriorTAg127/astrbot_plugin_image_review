@@ -200,7 +200,9 @@ class VLAICensor(CensorBase):
         # VLAI 主要用于图片审核，文本审核返回通过
         return RiskLevel.Pass, set()
 
-    async def detect_image(self, image: str, image_data: bytes | None = None) -> tuple[RiskLevel, set[str]]:
+    async def detect_image(
+        self, image: str, image_data: bytes | None = None
+    ) -> tuple[RiskLevel, set[str]]:
         """
         检测图片内容
 

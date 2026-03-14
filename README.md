@@ -3,7 +3,7 @@
 图片审核插件 / An image review plugin for AstrBot
 
 [![License](https://img.shields.io/github/license/AnteriorTAg127/astrbot_plugin_image_review)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v1.3.5-blue)](metadata.yaml)
+[![Version](https://img.shields.io/badge/version-v1.3.6-blue)](metadata.yaml)
 
 > [!IMPORTANT]
 > **本代码由 AI 生成，不保证代码质量，如有问题请多提 issues。**
@@ -15,6 +15,11 @@
 > [AstrBot](https://github.com/AstrBotDevs/AstrBot) 是一个支持多个主流即时通讯平台的智能助手，包括 QQ、Telegram、飞书、钉钉、Slack、Discord 等。本插件为 AstrBot 提供图片内容审核能力，帮助群管理员过滤不当图片内容。
 
 ## 更新日志
+
+### v1.3.6
+
+- **修复指令重复注册问题** - 将命令处理逻辑内联到 main.py，解决指令重复注册的 bug
+- **代码重构优化** - 移除 command_handlers.py，简化代码结构
 
 ### v1.3.5
 

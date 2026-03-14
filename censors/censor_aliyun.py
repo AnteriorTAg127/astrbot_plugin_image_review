@@ -155,7 +155,9 @@ class AliyunCensor(CensorBase):
         except Exception as e:
             raise CensorError(f"阿里云文本审核请求失败: {e}")
 
-    async def detect_image(self, image: str, image_data: bytes | None = None) -> tuple[RiskLevel, set[str]]:
+    async def detect_image(
+        self, image: str, image_data: bytes | None = None
+    ) -> tuple[RiskLevel, set[str]]:
         """
         对图片进行内容审核
 
