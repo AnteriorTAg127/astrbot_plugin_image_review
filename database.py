@@ -132,6 +132,22 @@ class DatabaseManager:
                 )
             """)
 
+            # 图片哈希表（用于相似图片匹配）
+            logger.debug("创建图片哈希表")
+            await cursor.execute("""
+                CREATE TABLE IF NOT EXISTS image_hashes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    md5_hash TEXT UNIQUE NOT NULL,
+                    phash TEXT,
+                    dhash TEXT,
+                    risk_level INTEGER,
+                    risk_reason TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    expires_at TIMESTAMP,
+                    hit_count INTEGER DEFAULT 0
+                )
+            """)
+
             # 创建索引
             logger.debug("创建索引")
             await cursor.execute("""
@@ -145,6 +161,15 @@ class DatabaseManager:
             """)
             await cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_violation_group ON violation_records(group_id)
+            """)
+            await cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_image_hashes_md5 ON image_hashes(md5_hash)
+            """)
+            await cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_image_hashes_phash ON image_hashes(phash)
+            """)
+            await cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_image_hashes_dhash ON image_hashes(dhash)
             """)
 
             await conn.commit()
@@ -568,7 +593,7 @@ class DatabaseManager:
             return cursor.rowcount
 
     async def clean_expired_list_entries(self):
-        """清理过期的黑白名单条目"""
+        """清理过期的黑白名单条目和图片哈希记录"""
         await self._init_db()
 
         async with aiosqlite.connect(self._db_path) as conn:
@@ -576,6 +601,9 @@ class DatabaseManager:
             now = datetime.now().isoformat()
             await cursor.execute("DELETE FROM whitelist WHERE expires_at < ?", (now,))
             await cursor.execute("DELETE FROM blacklist WHERE expires_at < ?", (now,))
+            await cursor.execute(
+                "DELETE FROM image_hashes WHERE expires_at < ?", (now,)
+            )
             await conn.commit()
 
     async def clear_all_cache(self) -> dict:
@@ -595,6 +623,189 @@ class DatabaseManager:
             await conn.commit()
 
             return {"whitelist": whitelist_count, "blacklist": blacklist_count}
+
+    # ========== 图片哈希管理（用于相似图片匹配） ==========
+
+    async def add_image_hash(
+        self,
+        md5_hash: str,
+        phash: str | None,
+        dhash: str | None,
+        risk_level: RiskLevel | None = None,
+        risk_reason: str | None = None,
+        base_expire_hours: int = 2,
+        max_expire_days: int = 14,
+    ):
+        """
+        添加图片哈希记录
+
+        Args:
+            md5_hash: MD5哈希值
+            phash: 感知哈希值
+            dhash: 差异哈希值
+            risk_level: 风险等级（白名单为None）
+            risk_reason: 风险原因
+            base_expire_hours: 基础过期时间（小时）
+            max_expire_days: 最大过期时间（天）
+        """
+        import logging
+
+        logger = logging.getLogger(__name__)
+        logger.debug(
+            f"添加图片哈希记录，MD5: {md5_hash}, phash: {phash}, dhash: {dhash}"
+        )
+        await self._init_db()
+
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+
+            # 检查是否已存在
+            await cursor.execute(
+                "SELECT hit_count FROM image_hashes WHERE md5_hash = ?", (md5_hash,)
+            )
+            result = await cursor.fetchone()
+
+            if result:
+                # 已存在，延长过期时间
+                hit_count = result[0]
+                expire_hours = min(
+                    int(base_expire_hours * (1.5 ** min(hit_count, 10))),
+                    max_expire_days * 24,
+                )
+            else:
+                expire_hours = base_expire_hours
+
+            expires_at = datetime.now() + timedelta(hours=expire_hours)
+            risk_level_value = risk_level.value if risk_level else None
+
+            await cursor.execute(
+                """INSERT OR REPLACE INTO image_hashes
+                   (md5_hash, phash, dhash, risk_level, risk_reason, expires_at, hit_count)
+                   VALUES (?, ?, ?, ?, ?, ?, COALESCE((SELECT hit_count FROM image_hashes WHERE md5_hash = ?), 0))""",
+                (
+                    md5_hash,
+                    phash,
+                    dhash,
+                    risk_level_value,
+                    risk_reason,
+                    expires_at.isoformat(),
+                    md5_hash,
+                ),
+            )
+            await conn.commit()
+            logger.debug(f"图片哈希记录添加完成，MD5: {md5_hash}")
+
+    async def find_similar_images(
+        self,
+        target_hash: str,
+        hash_type: str,
+        threshold: int,
+    ) -> list[tuple[str, int, RiskLevel | None, str | None]]:
+        """
+        查找相似图片
+
+        Args:
+            target_hash: 目标图片哈希值
+            hash_type: 哈希类型 ('phash' 或 'dhash')
+            threshold: 汉明距离阈值
+
+        Returns:
+            相似图片列表，每项为 (md5_hash, hamming_distance, risk_level, risk_reason)
+        """
+        import logging
+
+        logger = logging.getLogger(__name__)
+        logger.debug(
+            f"查找相似图片，目标哈希: {target_hash}, 类型: {hash_type}, 阈值: {threshold}"
+        )
+        await self._init_db()
+
+        if not target_hash:
+            return []
+
+        async with aiosqlite.connect(self._db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.cursor()
+
+            # 获取所有未过期的哈希记录
+            now = datetime.now().isoformat()
+            hash_column = "phash" if hash_type == "phash" else "dhash"
+
+            await cursor.execute(
+                f"""SELECT md5_hash, {hash_column} as hash_value, risk_level, risk_reason, expires_at
+                    FROM image_hashes
+                    WHERE {hash_column} IS NOT NULL AND expires_at > ?""",
+                (now,),
+            )
+            rows = await cursor.fetchall()
+
+            similar_images = []
+            for row in rows:
+                stored_hash = row["hash_value"]
+                if not stored_hash:
+                    continue
+
+                # 计算汉明距离
+                distance = self._hamming_distance(target_hash, stored_hash)
+                if distance <= threshold:
+                    risk_level = (
+                        RiskLevel(row["risk_level"])
+                        if row["risk_level"] is not None
+                        else None
+                    )
+                    similar_images.append(
+                        (
+                            row["md5_hash"],
+                            distance,
+                            risk_level,
+                            row["risk_reason"],
+                        )
+                    )
+
+            # 按汉明距离排序
+            similar_images.sort(key=lambda x: x[1])
+            logger.debug(f"找到 {len(similar_images)} 张相似图片")
+            return similar_images
+
+    @staticmethod
+    def _hamming_distance(hash1: str, hash2: str) -> int:
+        """
+        计算两个哈希值的汉明距离
+
+        Args:
+            hash1: 第一个哈希值（十六进制字符串）
+            hash2: 第二个哈希值（十六进制字符串）
+
+        Returns:
+            汉明距离
+        """
+        if len(hash1) != len(hash2):
+            # 长度不同时，取较短的长度进行比较
+            min_len = min(len(hash1), len(hash2))
+            hash1 = hash1[:min_len]
+            hash2 = hash2[:min_len]
+
+        try:
+            # 将十六进制字符串转换为整数
+            int1 = int(hash1, 16)
+            int2 = int(hash2, 16)
+            # 异或后计算1的位数
+            xor = int1 ^ int2
+            return bin(xor).count("1")
+        except ValueError:
+            return float("inf")
+
+    async def update_hash_hit_count(self, md5_hash: str):
+        """更新哈希记录命中次数"""
+        await self._init_db()
+
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute(
+                "UPDATE image_hashes SET hit_count = hit_count + 1 WHERE md5_hash = ?",
+                (md5_hash,),
+            )
+            await conn.commit()
 
     # ========== 人工白名单管理 ==========
 

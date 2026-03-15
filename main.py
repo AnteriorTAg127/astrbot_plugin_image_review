@@ -23,7 +23,7 @@ from .utils import ImageUtils, MessageUtils
     "image_review",
     "AnteriorTAg127",
     "图片审核插件，提供图片内容审核、违规处理、管理群通知等功能",
-    "1.3.6",
+    "1.3.7",
 )
 class ImageReviewPlugin(Star):
     """图片审核插件主类"""
@@ -169,7 +169,6 @@ class ImageReviewPlugin(Star):
             # 检查是否是图片消息
             message_chain = event.get_messages()
             images_to_check = []
-            forward_comp = None  # 保存转发消息组件，用于违规时转发
 
             # 检查是否跳过QQ自带表情包
             skip_qq_emoji = self._config.get("skip_qq_builtin_emoji", True)
@@ -184,7 +183,7 @@ class ImageReviewPlugin(Star):
                         continue
 
                     if image_url:
-                        images_to_check.append((image_url, image_md5, None))
+                        images_to_check.append((image_url, image_md5))
 
                 elif isinstance(comp, Comp.Forward):
                     # 检查是否启用了转发消息图片检测
@@ -194,9 +193,6 @@ class ImageReviewPlugin(Star):
                     if not enable_forward_censor:
                         continue
 
-                    # 保存转发消息组件
-                    forward_comp = comp
-
                     # 处理转发消息中的图片
                     forward_images = await self._extract_forward_images(event, comp)
                     if forward_images:
@@ -204,9 +200,7 @@ class ImageReviewPlugin(Star):
                         sampled_images = self._sample_images(
                             forward_images, group_id, group_config
                         )
-                        # 标记这些图片来自转发消息
-                        for img_url, img_md5 in sampled_images:
-                            images_to_check.append((img_url, img_md5, comp))
+                        images_to_check.extend(sampled_images)
 
             # 检查是否是图片消息且启用了图片审核
             if not images_to_check:
@@ -223,7 +217,7 @@ class ImageReviewPlugin(Star):
             )
 
             # 顺序处理所有图片（避免并发过高）
-            for image_url, image_md5, img_forward_comp in images_to_check:
+            for image_url, image_md5 in images_to_check:
                 try:
                     # 进行图片审核
                     (
@@ -252,7 +246,6 @@ class ImageReviewPlugin(Star):
                             risk_reason,
                             message_id,
                             image_data,
-                            img_forward_comp,  # 传递转发消息组件
                         )
                 except CensorError as e:
                     logger.error(f"图片审核异常: {e}")

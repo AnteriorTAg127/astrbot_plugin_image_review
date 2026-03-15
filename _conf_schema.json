@@ -60,6 +60,25 @@
         "hint": "启用后禁用系统的自动黑名单判定机制，所有黑名单判定仅基于人工配置数据",
         "default": false
     },
+    "enable_similarity_match": {
+        "type": "bool",
+        "description": "是否启用相似图片匹配",
+        "hint": "⚠️ 警告：开启后，在MD5精确匹配失败后会进行相似图片匹配（基于感知哈希phash/dhash和汉明距离）。注意：此功能可能导致误判，例如两张图片整体相似但某一小部分包含违规内容时，正常图片可能被误判为违规。建议仅在必要时开启，并结合人工审核使用。",
+        "default": false
+    },
+    "similarity_hash_algorithm": {
+        "type": "string",
+        "description": "相似图片哈希算法",
+        "hint": "选择用于计算图片相似度的感知哈希算法。phash对图片缩放/旋转/亮度变化更鲁棒，适合检测经过简单处理的相似图片；dhash对图片平移更敏感，计算速度更快。建议优先使用phash以获得更好的鲁棒性。",
+        "default": "phash",
+        "options": ["phash", "dhash"]
+    },
+    "similarity_hamming_threshold": {
+        "type": "int",
+        "description": "相似度汉明距离阈值",
+        "hint": "汉明距离越小表示图片越相似，建议值60-100。0表示完全相同，80以内通常认为是相似图片（基于24x24=576位哈希）。⚠️ 注意：阈值设置过低可能导致漏检，设置过高可能导致误判。建议从80开始测试，根据实际效果调整。如果频繁出现误判，请适当降低阈值或关闭此功能。",
+        "default": 80
+    },
     "aliyun": {
         "type": "object",
         "description": "阿里云内容安全配置",

@@ -5,10 +5,20 @@
 
 import os
 import re
+from io import BytesIO
 
 import astrbot.api.message_components as Comp
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
+
+# 尝试导入 PIL，如果不可用则提供降级方案
+try:
+    from PIL import Image
+
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
+    logger.warning("PIL/Pillow 未安装，相似图片匹配功能将不可用")
 
 
 class ImageUtils:
@@ -130,3 +140,126 @@ class ImageUtils:
         except Exception as e:
             logger.debug(f"提取图片MD5时发生异常: {e}")
         return None
+
+    @staticmethod
+    def calculate_phash(image_data: bytes, hash_size: int = 24) -> str | None:
+        """
+        计算图片的感知哈希值（pHash）
+
+        感知哈希对图片缩放、旋转、亮度变化等具有较好的鲁棒性
+
+        Args:
+            image_data: 图片字节数据
+            hash_size: 哈希大小，默认24（生成576位哈希）
+
+        Returns:
+            十六进制哈希字符串，如果计算失败则返回None
+        """
+        if not HAS_PIL:
+            return None
+
+        try:
+            # 加载图片
+            img = Image.open(BytesIO(image_data))
+
+            # 转换为灰度图
+            if img.mode != "L":
+                img = img.convert("L")
+
+            # 缩放图片到 (hash_size + 1) x hash_size
+            # 使用ANTIALIAS滤波器
+            img = img.resize((hash_size + 1, hash_size), Image.Resampling.LANCZOS)
+
+            # 获取像素值
+            pixels = list(img.getdata())
+
+            # 计算差异值（水平方向相邻像素的差值）
+            diff = []
+            for row in range(hash_size):
+                for col in range(hash_size):
+                    left_pixel = pixels[row * (hash_size + 1) + col]
+                    right_pixel = pixels[row * (hash_size + 1) + col + 1]
+                    diff.append(left_pixel > right_pixel)
+
+            # 将差异值转换为十六进制字符串
+            decimal_value = 0
+            for bit in diff:
+                decimal_value = (decimal_value << 1) | int(bit)
+
+            # 格式化为十六进制字符串
+            hex_length = hash_size * hash_size // 4
+            return format(decimal_value, f"0{hex_length}x")
+
+        except Exception as e:
+            logger.debug(f"计算pHash时发生异常: {e}")
+            return None
+
+    @staticmethod
+    def calculate_dhash(image_data: bytes, hash_size: int = 24) -> str | None:
+        """
+        计算图片的差异哈希值（dHash）
+
+        差异哈希对图片平移、缩放等变化敏感，计算速度快
+
+        Args:
+            image_data: 图片字节数据
+            hash_size: 哈希大小，默认24（生成576位哈希）
+
+        Returns:
+            十六进制哈希字符串，如果计算失败则返回None
+        """
+        if not HAS_PIL:
+            return None
+
+        try:
+            # 加载图片
+            img = Image.open(BytesIO(image_data))
+
+            # 转换为灰度图
+            if img.mode != "L":
+                img = img.convert("L")
+
+            # 缩放图片到 (hash_size + 1) x hash_size
+            img = img.resize((hash_size + 1, hash_size), Image.Resampling.LANCZOS)
+
+            # 获取像素值
+            pixels = list(img.getdata())
+
+            # 计算差异值（水平方向相邻像素的差值）
+            diff = []
+            for row in range(hash_size):
+                for col in range(hash_size):
+                    left_pixel = pixels[row * (hash_size + 1) + col]
+                    right_pixel = pixels[row * (hash_size + 1) + col + 1]
+                    diff.append(left_pixel > right_pixel)
+
+            # 将差异值转换为十六进制字符串
+            decimal_value = 0
+            for bit in diff:
+                decimal_value = (decimal_value << 1) | int(bit)
+
+            # 格式化为十六进制字符串
+            hex_length = hash_size * hash_size // 4
+            return format(decimal_value, f"0{hex_length}x")
+
+        except Exception as e:
+            logger.debug(f"计算dHash时发生异常: {e}")
+            return None
+
+    @staticmethod
+    def calculate_image_hashes(
+        image_data: bytes, hash_size: int = 24
+    ) -> tuple[str | None, str | None]:
+        """
+        同时计算图片的pHash和dHash
+
+        Args:
+            image_data: 图片字节数据
+            hash_size: 哈希大小，默认24
+
+        Returns:
+            (phash, dhash) 元组，如果计算失败则对应值为None
+        """
+        phash = ImageUtils.calculate_phash(image_data, hash_size)
+        dhash = ImageUtils.calculate_dhash(image_data, hash_size)
+        return phash, dhash

@@ -12,6 +12,7 @@ import aiohttp
 from astrbot.api import logger
 
 from ..database import DatabaseManager, RiskLevel
+from ..utils import ImageUtils
 from .censor_aliyun import AliyunCensor
 from .censor_base import CensorBase, CensorError
 from .censor_vlai import VLAICensor
@@ -271,6 +272,10 @@ class CensorFlow:
         # 用于保存下载的图片数据，供后续动图检测使用
         downloaded_image_data: bytes | None = None
 
+        # 用于保存图片哈希值（相似图片匹配使用）
+        phash: str | None = None
+        dhash: str | None = None
+
         try:
             logger.debug(f"开始审核图片，URL: {image_url}, 群: {group_id}")
             # 如果提供了预计算的MD5，直接使用
@@ -335,7 +340,76 @@ class CensorFlow:
             else:
                 logger.debug("自动黑名单已禁用，跳过检查")
 
-            # 5. 调用API审核
+            # 5. 相似图片匹配（如果启用）
+            enable_similarity = self._config.get("enable_similarity_match", False)
+            if enable_similarity:
+                logger.debug("开始相似图片匹配检查")
+                # 确保有图片数据用于计算哈希
+                if downloaded_image_data is None:
+                    logger.debug("需要下载图片进行相似度计算")
+                    downloaded_image_data = await download_image(image_url)
+
+                # 计算图片哈希值（在线程池中执行以避免阻塞事件循环）
+                phash, dhash = await asyncio.to_thread(
+                    ImageUtils.calculate_image_hashes, downloaded_image_data
+                )
+                logger.debug(f"图片哈希计算完成，phash: {phash}, dhash: {dhash}")
+
+                if phash or dhash:
+                    # 获取配置的哈希算法和阈值
+                    hash_algorithm = self._config.get(
+                        "similarity_hash_algorithm", "phash"
+                    )
+                    hamming_threshold = self._config.get(
+                        "similarity_hamming_threshold", 10
+                    )
+
+                    # 选择要使用的哈希值
+                    target_hash = (
+                        phash if hash_algorithm == "phash" and phash else dhash
+                    )
+
+                    if target_hash:
+                        # 查找相似图片
+                        similar_images = await self._db.find_similar_images(
+                            target_hash, hash_algorithm, hamming_threshold
+                        )
+
+                        if similar_images:
+                            # 找到相似图片，取汉明距离最小的
+                            best_match = similar_images[0]
+                            match_md5, distance, match_risk_level, match_risk_reason = (
+                                best_match
+                            )
+
+                            if match_risk_level is not None:
+                                # 相似图片在黑名单中
+                                logger.info(
+                                    f"找到相似黑名单图片，MD5: {match_md5}, "
+                                    f"汉明距离: {distance}, 风险等级: {match_risk_level.name}"
+                                )
+                                await self._db.update_hash_hit_count(match_md5)
+                                return (
+                                    match_risk_level,
+                                    f"相似违规图片(汉明距离:{distance}): {match_risk_reason or ''}",
+                                    md5_hash,
+                                    downloaded_image_data,
+                                )
+                            else:
+                                # 相似图片在白名单中
+                                logger.info(
+                                    f"找到相似白名单图片，MD5: {match_md5}, "
+                                    f"汉明距离: {distance}"
+                                )
+                                await self._db.update_hash_hit_count(match_md5)
+                                return (
+                                    RiskLevel.Pass,
+                                    f"相似白名单图片(汉明距离:{distance})",
+                                    md5_hash,
+                                    downloaded_image_data,
+                                )
+
+            # 6. 调用API审核
             if not self._image_censor:
                 logger.debug("未配置审核器，直接通过")
                 return RiskLevel.Pass, "未配置审核器", md5_hash, downloaded_image_data
@@ -400,6 +474,28 @@ class CensorFlow:
                     logger.debug("添加到自动白名单完成")
                 else:
                     logger.debug("自动白名单已禁用，不添加到白名单")
+
+                # 如果启用了相似图片匹配，保存哈希到数据库
+                if enable_similarity and downloaded_image_data is not None:
+                    try:
+                        # 如果之前没有计算哈希，现在计算
+                        if not phash and not dhash:
+                            phash, dhash = await asyncio.to_thread(
+                                ImageUtils.calculate_image_hashes, downloaded_image_data
+                            )
+                        await self._db.add_image_hash(
+                            md5_hash,
+                            phash,
+                            dhash,
+                            risk_level=None,  # 白名单图片risk_level为None
+                            risk_reason=None,
+                            base_expire_hours=expire_hours,
+                            max_expire_days=expire_days,
+                        )
+                        logger.debug(f"保存白名单图片哈希完成，MD5: {md5_hash}")
+                    except Exception as e:
+                        logger.debug(f"保存白名单图片哈希失败: {e}")
+
             elif risk_level in (RiskLevel.Review, RiskLevel.Block):
                 if not disable_auto_blacklist:
                     logger.debug(
@@ -415,6 +511,27 @@ class CensorFlow:
                     logger.debug("添加到自动黑名单完成")
                 else:
                     logger.debug("自动黑名单已禁用，不添加到黑名单")
+
+                # 如果启用了相似图片匹配，保存哈希到数据库
+                if enable_similarity and downloaded_image_data is not None:
+                    try:
+                        # 如果之前没有计算哈希，现在计算
+                        if not phash and not dhash:
+                            phash, dhash = await asyncio.to_thread(
+                                ImageUtils.calculate_image_hashes, downloaded_image_data
+                            )
+                        await self._db.add_image_hash(
+                            md5_hash,
+                            phash,
+                            dhash,
+                            risk_level=risk_level,
+                            risk_reason=risk_reason,
+                            base_expire_hours=expire_hours,
+                            max_expire_days=expire_days,
+                        )
+                        logger.debug(f"保存黑名单图片哈希完成，MD5: {md5_hash}")
+                    except Exception as e:
+                        logger.debug(f"保存黑名单图片哈希失败: {e}")
 
             logger.debug(
                 f"图片审核流程完成，最终结果: 风险等级={risk_level.name}, 原因={risk_reason}, MD5={md5_hash}"
