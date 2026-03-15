@@ -222,6 +222,86 @@ class ViolationHandler:
         except Exception as e:
             logger.error(f"禁言用户失败: {e}")
 
+    async def _get_forward_message_nodes(
+        self,
+        event: AstrMessageEvent,
+        forward_comp: BaseMessageComponent,
+    ) -> list[Node]:
+        """
+        获取转发消息的内容并转换为节点列表
+
+        Args:
+            event: 消息事件
+            forward_comp: 转发消息组件
+
+        Returns:
+            转发消息内容转换的节点列表
+        """
+        nodes = []
+        try:
+            # 获取转发消息ID
+            forward_id = None
+            if hasattr(forward_comp, "id") and forward_comp.id:
+                forward_id = forward_comp.id
+            elif hasattr(forward_comp, "forward_id") and forward_comp.forward_id:
+                forward_id = forward_comp.forward_id
+
+            if not forward_id:
+                logger.debug("转发消息ID为空，无法获取内容")
+                return nodes
+
+            # 通过API获取转发消息内容
+            platform_name = event.get_platform_name()
+            if platform_name == "aiocqhttp":
+                from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
+                    AiocqhttpMessageEvent,
+                )
+
+                if isinstance(event, AiocqhttpMessageEvent):
+                    client = event.bot
+                    try:
+                        # 调用get_forward_msg API获取转发消息内容
+                        forward_data = await client.api.call_action(
+                            "get_forward_msg", message_id=forward_id
+                        )
+
+                        if forward_data and "messages" in forward_data:
+                            for msg in forward_data["messages"]:
+                                sender = msg.get("sender", {})
+                                sender_uin = sender.get("user_id", 0)
+                                sender_name = sender.get("nickname", "未知")
+                                msg_content = msg.get("message", [])
+
+                                # 转换消息内容为组件列表
+                                content = []
+                                for msg_item in msg_content:
+                                    if isinstance(msg_item, dict):
+                                        msg_type = msg_item.get("type")
+                                        msg_data = msg_item.get("data", {})
+                                        if msg_type == "text":
+                                            content.append(
+                                                Plain(msg_data.get("text", ""))
+                                            )
+                                        elif msg_type == "image":
+                                            img_url = msg_data.get("url", "")
+                                            if img_url:
+                                                content.append(Image.fromURL(img_url))
+
+                                if content:
+                                    nodes.append(
+                                        Node(
+                                            uin=int(sender_uin),
+                                            name=sender_name,
+                                            content=content,
+                                        )
+                                    )
+                    except Exception as e:
+                        logger.debug(f"获取转发消息内容失败: {e}")
+
+        except Exception as e:
+            logger.debug(f"获取转发消息节点异常: {e}")
+        return nodes
+
     async def _notify_manage_group(
         self,
         event: AstrMessageEvent,
@@ -326,7 +406,7 @@ class ViolationHandler:
                 )
             )
 
-            # 3. 如果是转发消息，添加原始转发消息
+            # 3. 如果是转发消息，添加原始转发消息内容
             if forward_comp:
                 # 添加分隔说明
                 nodes.append(
@@ -336,10 +416,21 @@ class ViolationHandler:
                         content=[Plain("📎 以下为原始转发消息内容")],
                     )
                 )
-                # 添加原始转发消息
-                nodes.append(
-                    Node(uin=int(user_id), name=user_name, content=[forward_comp])
+                # 获取转发消息的实际内容并展开为节点
+                forward_nodes = await self._get_forward_message_nodes(
+                    event, forward_comp
                 )
+                if forward_nodes:
+                    nodes.extend(forward_nodes)
+                else:
+                    # 如果获取失败，添加提示
+                    nodes.append(
+                        Node(
+                            uin=int(user_id),
+                            name=user_name,
+                            content=[Plain("⚠️ 无法获取原始转发消息内容")],
+                        )
+                    )
 
             # 发送到管理群
             platform_name = event.get_platform_name()
