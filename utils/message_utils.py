@@ -33,6 +33,15 @@ class MessageUtils:
                     result.append({"type": "image", "data": {"file": comp.file}})
                 elif comp.url:
                     result.append({"type": "image", "data": {"file": comp.url}})
+            elif isinstance(comp, Comp.Forward):
+                # 处理转发消息
+                forward_id = None
+                if hasattr(comp, "id") and comp.id:
+                    forward_id = comp.id
+                elif hasattr(comp, "forward_id") and comp.forward_id:
+                    forward_id = comp.forward_id
+                if forward_id:
+                    result.append({"type": "forward", "data": {"id": forward_id}})
         return result
 
     @staticmethod
