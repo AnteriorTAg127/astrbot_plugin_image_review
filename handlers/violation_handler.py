@@ -13,7 +13,7 @@ import aiofiles
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
-from astrbot.api.message_components import Image, Node, Plain
+from astrbot.api.message_components import BaseMessageComponent, Image, Node, Plain
 
 from ..database import DatabaseManager, RiskLevel
 from ..utils.image_utils import ImageUtils
@@ -60,6 +60,7 @@ class ViolationHandler:
         risk_reason: str,
         message_id: str,
         image_data: bytes | None = None,
+        forward_comp: BaseMessageComponent | None = None,
     ) -> None:
         """
         处理违规图片
@@ -74,6 +75,8 @@ class ViolationHandler:
             risk_level: 风险等级
             risk_reason: 风险原因
             message_id: 消息ID
+            image_data: 图片数据
+            forward_comp: 转发消息组件（如果是转发消息中的违规）
         """
         try:
             # 获取该群的配置
@@ -101,6 +104,7 @@ class ViolationHandler:
                     auto_recall=group_config.get("auto_recall", True),
                     auto_mute=group_config.get("auto_mute", True),
                     image_data=image_data,
+                    forward_comp=forward_comp,
                 )
                 logger.info(f"管理员违规通知已发送: 用户={user_id}, 群={group_id}")
                 return
@@ -155,6 +159,7 @@ class ViolationHandler:
                 auto_recall=group_config.get("auto_recall", True),
                 auto_mute=group_config.get("auto_mute", True),
                 image_data=image_data,
+                forward_comp=forward_comp,
             )
 
             logger.info(
@@ -233,6 +238,7 @@ class ViolationHandler:
         auto_recall: bool = True,
         auto_mute: bool = True,
         image_data: bytes | None = None,
+        forward_comp: BaseMessageComponent | None = None,
     ) -> None:
         """
         通知管理群
@@ -252,6 +258,7 @@ class ViolationHandler:
             auto_recall: 是否自动撤回
             auto_mute: 是否自动禁言
             image_data: 已下载的图片数据（可选，避免重复下载）
+            forward_comp: 转发消息组件（如果是转发消息中的违规）
         """
         try:
             manage_group_id = self._config_manager.get_manage_group_id(group_id)
@@ -284,13 +291,15 @@ class ViolationHandler:
                     mute_str = "未开启禁言"
                 action_str = f"{recall_str}+{mute_str}"
 
-            # 构建违规信息（新格式）
+            # 构建违规信息
             evidence_path_str = (
                 f"\n证据图片已保存: {evidence_path}" if evidence_path else ""
             )
             admin_tag = " [管理员/群主]" if is_admin else ""
+            forward_tag = " [转发消息]" if forward_comp else ""
+
             violation_info = (
-                f"⚠️ 违规图片检测通知\n"
+                f"⚠️ 违规图片检测通知{forward_tag}\n"
                 f"━━━━━━━━━━━━━━━\n"
                 f"1️⃣ 昵称: {user_name}{admin_tag}\n"
                 f"2️⃣ QQ号: {user_id}\n"
@@ -305,17 +314,32 @@ class ViolationHandler:
             # 构建合并转发消息
             nodes = []
 
-            # 添加违规信息节点
+            # 1. 添加违规信息节点
             nodes.append(
                 Node(uin=int(user_id), name=user_name, content=[Plain(violation_info)])
             )
 
-            # 添加违规图片节点（使用QQ图片URL，NapCat可直接下载）
+            # 2. 添加违规图片节点
             nodes.append(
                 Node(
                     uin=int(user_id), name=user_name, content=[Image.fromURL(image_url)]
                 )
             )
+
+            # 3. 如果是转发消息，添加原始转发消息
+            if forward_comp:
+                # 添加分隔说明
+                nodes.append(
+                    Node(
+                        uin=int(user_id),
+                        name=user_name,
+                        content=[Plain("📎 以下为原始转发消息内容")],
+                    )
+                )
+                # 添加原始转发消息
+                nodes.append(
+                    Node(uin=int(user_id), name=user_name, content=[forward_comp])
+                )
 
             # 发送到管理群
             platform_name = event.get_platform_name()
