@@ -1,18 +1,17 @@
 """
 阿里云内容审核模块
-使用阿里云官方Python SDK进行文本和图片审核
+使用阿里云HTTP API进行文本和图片审核，避免cryptography版本冲突
 """
 
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
-from concurrent.futures import ThreadPoolExecutor
+import time
 from typing import Any
 
 import aiohttp
-from alibabacloud_green20220302 import models
-from alibabacloud_green20220302.client import Client
-from alibabacloud_tea_openapi.models import Config
-from alibabacloud_tea_util import models as util_models
 
 from ..database import RiskLevel
 from .censor_base import CensorBase, CensorError
@@ -37,9 +36,6 @@ class AliyunCensor(CensorBase):
         self._image_info_type = config.get("image_info_type", "customImage,textInImage")
         self._session = None
         self._semaphore = asyncio.Semaphore(80)
-        self._executor = ThreadPoolExecutor(
-            max_workers=20, thread_name_prefix="aliyun_censor"
-        )
 
     async def initialize(self):
         """初始化异步资源"""
@@ -49,14 +45,118 @@ class AliyunCensor(CensorBase):
             )
 
     async def close(self):
-        """关闭HTTP会话和线程池"""
+        """关闭HTTP会话"""
         if self._session:
             await self._session.close()
             self._session = None
-        # 关闭线程池 - 使用 wait=False 避免阻塞事件循环
-        if self._executor:
-            self._executor.shutdown(wait=False)
-            self._executor = None
+
+    def _sign_request(
+        self, method: str, path: str, headers: dict, query: dict | None = None
+    ) -> dict:
+        """
+        生成阿里云 ROA API 签名
+
+        Args:
+            method: HTTP方法 (GET, POST, etc.)
+            path: 请求路径
+            headers: 请求头
+            query: 查询参数
+
+        Returns:
+            添加签名后的请求头
+        """
+        sign_headers = {}
+        for key, value in headers.items():
+            if key.startswith("x-ca-") or key in (
+                "content-type",
+                "content-md5",
+                "date",
+            ):
+                sign_headers[key.lower()] = value
+
+        sorted_query = sorted(query.items()) if query else []
+        query_string = "&".join(f"{k}={v}" for k, v in sorted_query)
+
+        canonicalized_resource = path
+        if query_string:
+            canonicalized_resource += "?" + query_string
+
+        string_to_sign = (
+            f"{method}\n"
+            f"{sign_headers.get('content-type', '')}\n"
+            f"{sign_headers.get('content-md5', '')}\n"
+            f"{sign_headers.get('date', '')}\n"
+            f"{canonicalized_resource}"
+        )
+
+        signature = hmac.new(
+            self._key_secret.encode("utf-8"),
+            string_to_sign.encode("utf-8"),
+            hashlib.sha1,
+        ).digest()
+        signature = base64.b64encode(signature).decode("utf-8")
+
+        headers["Authorization"] = f"acs {self._key_id}:{signature}"
+        return headers
+
+    async def _call_api(
+        self,
+        method: str,
+        path: str,
+        body: dict | None = None,
+        query: dict | None = None,
+    ) -> dict:
+        """
+        调用阿里云 API
+
+        Args:
+            method: HTTP方法
+            path: 请求路径
+            body: 请求体
+            query: 查询参数
+
+        Returns:
+            API响应数据
+        """
+        await self.initialize()
+
+        url = f"https://{self._endpoint}{path}"
+
+        content_md5 = ""
+        headers = {
+            "Content-Type": "application/json",
+            "Date": time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime()),
+            "x-ca-signaturemethod": "HMAC-SHA1",
+            "x-ca-version": "2022-03-02",
+        }
+
+        if body:
+            body_str = json.dumps(body)
+            content_md5 = base64.b64encode(
+                hashlib.md5(body_str.encode("utf-8")).digest()
+            ).decode("utf-8")
+            headers["Content-MD5"] = content_md5
+            headers["Content-Length"] = str(len(body_str))
+        else:
+            headers["Content-Length"] = "0"
+
+        headers = self._sign_request(method, path, headers, query)
+
+        async with self._semaphore:
+            if method == "POST":
+                async with self._session.request(
+                    method,
+                    url,
+                    json=body,
+                    headers=headers,
+                    params=query,
+                ) as response:
+                    return await response.json()
+            else:
+                async with self._session.request(
+                    method, url, headers=headers, params=query
+                ) as response:
+                    return await response.json()
 
     async def detect_text(self, text: str) -> tuple[RiskLevel, set[str]]:
         """
@@ -68,8 +168,6 @@ class AliyunCensor(CensorBase):
         Returns:
             (风险等级, 风险词集合)
         """
-        await self.initialize()
-
         if not text:
             return RiskLevel.Pass, set()
 
@@ -101,54 +199,36 @@ class AliyunCensor(CensorBase):
             (风险等级, 风险词集合)
         """
         try:
-            config = Config(
-                access_key_id=self._key_id,
-                access_key_secret=self._key_secret,
-                endpoint=self._endpoint,
-                region_id=self._region_id,
-            )
-            client = Client(config)
-            runtime = util_models.RuntimeOptions()
+            body = {
+                "Service": "chat_detection_pro",
+                "ServiceParameters": json.dumps({"content": content}),
+            }
 
-            service_params = {"content": content}
-            request = models.TextModerationRequest(
-                service="chat_detection_pro",
-                service_parameters=json.dumps(service_params),
-            )
+            response = await self._call_api("POST", "/", body=body)
 
-            async with self._semaphore:
-                response = await asyncio.get_event_loop().run_in_executor(
-                    self._executor,
-                    lambda: client.text_moderation_with_options(request, runtime),
-                )
+            if response.get("Code") != 200:
+                raise CensorError(f"阿里云文本审核失败: {response.get('Msg')}")
 
-                if response.status_code != 200:
-                    raise CensorError(
-                        f"阿里云文本审核请求失败: HTTP {response.status_code}"
-                    )
+            data = response.get("Data", {})
+            risk_level = (data.get("RiskLevel") or "pass").lower()
+            risk_words_set: set[str] = set()
 
-                body = response.body
-                if body.code != 200:
-                    raise CensorError(f"阿里云文本审核失败: {body.msg}")
+            if data.get("Result"):
+                for r_data in data["Result"]:
+                    if r_data.get("RiskWords"):
+                        risk_words_list = [
+                            word.strip()
+                            for word in r_data["RiskWords"].split(",")
+                            if word.strip()
+                        ]
+                        risk_words_set.update(risk_words_list)
 
-                data = body.data
-                risk_level = data.risk_level.lower() if data.risk_level else "pass"
-                risk_words_set: set[str] = set()
-
-                if data.result:
-                    for r_data in data.result:
-                        if hasattr(r_data, "risk_words") and r_data.risk_words:
-                            risk_words_list = [
-                                word.strip() for word in r_data.risk_words.split(",")
-                            ]
-                            risk_words_set.update(risk_words_list)
-
-                if risk_level in ("none", "low"):
-                    return RiskLevel.Pass, risk_words_set
-                elif risk_level == "high":
-                    return RiskLevel.Block, risk_words_set
-                else:
-                    return RiskLevel.Review, risk_words_set
+            if risk_level in ("none", "low"):
+                return RiskLevel.Pass, risk_words_set
+            elif risk_level == "high":
+                return RiskLevel.Block, risk_words_set
+            else:
+                return RiskLevel.Review, risk_words_set
 
         except CensorError:
             raise
@@ -163,7 +243,7 @@ class AliyunCensor(CensorBase):
 
         Args:
             image: 图片URL或base64字符串
-            image_data: 已下载的图片数据（可选，阿里云不需要此参数）
+            image_data: 已下载的图片数据（可选）
 
         Returns:
             (风险等级, 风险描述集合)
@@ -177,55 +257,37 @@ class AliyunCensor(CensorBase):
             raise CensorError("预期外的输入")
 
         try:
-            config = Config(
-                access_key_id=self._key_id,
-                access_key_secret=self._key_secret,
-                endpoint=self._endpoint,
-                region_id=self._region_id,
-            )
-            client = Client(config)
-            runtime = util_models.RuntimeOptions()
+            body = {
+                "Service": self._image_service,
+                "ServiceParameters": json.dumps(
+                    {"imageUrl": image, "infoType": self._image_info_type}
+                ),
+            }
 
-            service_params = {"imageUrl": image, "infoType": self._image_info_type}
-            request = models.ImageModerationRequest(
-                service=self._image_service,
-                service_parameters=json.dumps(service_params),
-            )
+            response = await self._call_api("POST", "/", body=body)
 
-            async with self._semaphore:
-                response = await asyncio.get_event_loop().run_in_executor(
-                    self._executor,
-                    lambda: client.image_moderation_with_options(request, runtime),
-                )
+            if response.get("Code") != 200:
+                raise CensorError(f"阿里云图片审核失败: {response.get('Msg')}")
 
-                if response.status_code != 200:
-                    raise CensorError(
-                        f"阿里云图片审核请求失败: HTTP {response.status_code}"
-                    )
+            data = response.get("Data", {})
+            risk_level = (data.get("RiskLevel") or "pass").lower()
+            reason_words_set: set[str] = set()
 
-                body = response.body
-                if body.code != 200:
-                    raise CensorError(f"阿里云图片审核失败: {body.msg}")
+            if data.get("Result"):
+                for item in data["Result"]:
+                    if item.get("Label"):
+                        reason_words_set.add(item["Label"])
+                    if item.get("SubLabel"):
+                        reason_words_set.add(item["SubLabel"])
+                    if item.get("Description"):
+                        reason_words_set.add(item["Description"])
 
-                data = body.data
-                risk_level = data.risk_level.lower() if data.risk_level else "pass"
-                reason_words_set: set[str] = set()
-
-                if data.result:
-                    for item in data.result:
-                        if hasattr(item, "label") and item.label:
-                            reason_words_set.add(item.label)
-                        if hasattr(item, "sub_label") and item.sub_label:
-                            reason_words_set.add(item.sub_label)
-                        if hasattr(item, "description") and item.description:
-                            reason_words_set.add(item.description)
-
-                if risk_level in ("none", "low"):
-                    return RiskLevel.Pass, reason_words_set
-                elif risk_level == "high":
-                    return RiskLevel.Block, reason_words_set
-                else:
-                    return RiskLevel.Review, reason_words_set
+            if risk_level in ("none", "low"):
+                return RiskLevel.Pass, reason_words_set
+            elif risk_level == "high":
+                return RiskLevel.Block, reason_words_set
+            else:
+                return RiskLevel.Review, reason_words_set
 
         except CensorError:
             raise
