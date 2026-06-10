@@ -198,7 +198,7 @@ class ImageReviewPlugin(Star):
                     if forward_images:
                         # 应用抽检逻辑
                         sampled_images = self._sample_images(
-                            forward_images, group_id, group_config
+                            forward_images, group_id
                         )
                         images_to_check.extend(sampled_images)
 
@@ -334,7 +334,6 @@ class ImageReviewPlugin(Star):
         self,
         images: list[tuple[str, str | None]],
         group_id: str,
-        group_config: dict | None,
     ) -> list[tuple[str, str | None]]:
         """
         对转发消息中的图片进行抽检
@@ -342,7 +341,6 @@ class ImageReviewPlugin(Star):
         Args:
             images: 所有图片列表
             group_id: 群ID
-            group_config: 群配置
 
         Returns:
             抽检后的图片列表
@@ -548,9 +546,9 @@ class ImageReviewPlugin(Star):
                     result += f"  人工黑名单: ✅ 是 (等级: {manual_blacklist_result[0].name})\n"
                 else:
                     result += "  人工黑名单: ❌ 否\n"
-                in_auto_whitelist = await self._db.check_whitelist(md5_hash)
+                in_auto_whitelist = await self._db.check_whitelist(md5_hash, extend_on_hit=False)
                 result += f"  自动白名单: {'✅ 是' if in_auto_whitelist else '❌ 否'}\n"
-                auto_blacklist_result = await self._db.check_blacklist(md5_hash)
+                auto_blacklist_result = await self._db.check_blacklist(md5_hash, extend_on_hit=False)
                 if auto_blacklist_result:
                     result += (
                         f"  自动黑名单: ✅ 是 (等级: {auto_blacklist_result[0].name})\n"

@@ -3,6 +3,7 @@
 包含图片相关的通用工具函数
 """
 
+import math
 import os
 import re
 from io import BytesIO
@@ -142,15 +143,51 @@ class ImageUtils:
         return None
 
     @staticmethod
+    def _dct_1d(vector: list[float]) -> list[float]:
+        """一维离散余弦变换（Type-II DCT）"""
+        n = len(vector)
+        result = [0.0] * n
+        sqrt_n = math.sqrt(n)
+        sqrt_2n = math.sqrt(2.0 / n)
+        for u in range(n):
+            s = 0.0
+            for x in range(n):
+                s += vector[x] * math.cos((2 * x + 1) * u * math.pi / (2 * n))
+            c = 1.0 / sqrt_n if u == 0 else sqrt_2n
+            result[u] = c * s
+        return result
+
+    @staticmethod
+    def _dct_2d(block: list[list[float]]) -> list[list[float]]:
+        """
+        使用行列分离法计算二维离散余弦变换（Type-II DCT）
+
+        先对每行做 1D DCT，再对每列做 1D DCT，复杂度 O(2n³)
+        """
+        n = len(block)
+        # 对每行做 1D DCT
+        rows = [ImageUtils._dct_1d(row) for row in block]
+        # 对每列做 1D DCT
+        result = [[0.0] * n for _ in range(n)]
+        for col in range(n):
+            column = [rows[row][col] for row in range(n)]
+            transformed = ImageUtils._dct_1d(column)
+            for row in range(n):
+                result[row][col] = transformed[row]
+        return result
+
+    @staticmethod
     def calculate_phash(image_data: bytes, hash_size: int = 24) -> str | None:
         """
         计算图片的感知哈希值（pHash）
 
-        感知哈希对图片缩放、旋转、亮度变化等具有较好的鲁棒性
+        使用 DCT（离散余弦变换）实现，对图片缩放、旋转、亮度变化等具有较好的鲁棒性。
+        缩放到 48x48 后做 DCT，保留左上角 24x24 低频系数，生成 576 位（144 位十六进制）哈希值。
+        与 dHash 位数一致，可以使用相同的汉明距离阈值。
 
         Args:
             image_data: 图片字节数据
-            hash_size: 哈希大小，默认24（生成576位哈希）
+            hash_size: 为保持接口兼容保留的参数，实际使用固定 24x24
 
         Returns:
             十六进制哈希字符串，如果计算失败则返回None
@@ -166,29 +203,42 @@ class ImageUtils:
             if img.mode != "L":
                 img = img.convert("L")
 
-            # 缩放图片到 (hash_size + 1) x hash_size
-            # 使用ANTIALIAS滤波器
-            img = img.resize((hash_size + 1, hash_size), Image.Resampling.LANCZOS)
+            # 缩放到 48x48 像素（保留更多细节给 DCT）
+            dct_size = 48
+            img = img.resize((dct_size, dct_size), Image.Resampling.LANCZOS)
 
-            # 获取像素值
-            pixels = list(img.getdata())
+            # 使用 img.load() 快速访问像素
+            pixels_buffer = img.load()
+            # 构建 2D 像素数组
+            pixels_2d: list[list[float]] = []
+            for y in range(dct_size):
+                row: list[float] = []
+                for x in range(dct_size):
+                    row.append(float(pixels_buffer[x, y]))
+                pixels_2d.append(row)
 
-            # 计算差异值（水平方向相邻像素的差值）
-            diff = []
-            for row in range(hash_size):
-                for col in range(hash_size):
-                    left_pixel = pixels[row * (hash_size + 1) + col]
-                    right_pixel = pixels[row * (hash_size + 1) + col + 1]
-                    diff.append(left_pixel > right_pixel)
+            # 应用 2D DCT 得到系数矩阵
+            dct_result = ImageUtils._dct_2d(pixels_2d)
 
-            # 将差异值转换为十六进制字符串
-            decimal_value = 0
-            for bit in diff:
-                decimal_value = (decimal_value << 1) | int(bit)
+            # 保留左上角 24x24 低频系数（共 576 位）
+            keep_size = 24
+            low_freq: list[float] = []
+            for u in range(keep_size):
+                for v in range(keep_size):
+                    low_freq.append(dct_result[u][v])
 
-            # 格式化为十六进制字符串
-            hex_length = hash_size * hash_size // 4
-            return format(decimal_value, f"0{hex_length}x")
+            # 计算 576 个系数的中位数
+            sorted_coeffs = sorted(low_freq)
+            median = sorted_coeffs[len(sorted_coeffs) // 2]
+
+            # 生成 576 位哈希值：每个系数大于中位数则为 1，否则为 0
+            bits = 0
+            for coeff in low_freq:
+                bits = (bits << 1) | (1 if coeff > median else 0)
+
+            # 格式化为 144 位十六进制字符串（576 位 / 4 = 144 字符）
+            hex_length = keep_size * keep_size // 4
+            return format(bits, f"0{hex_length}x")
 
         except Exception as e:
             logger.debug(f"计算pHash时发生异常: {e}")

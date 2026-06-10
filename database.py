@@ -21,6 +21,7 @@ class RiskLevel(Enum):
 
 class DatabaseManager:
     """数据库管理器"""
+    HASH_VERSION = 2
 
     def __init__(self, data_dir: str):
         """
@@ -148,6 +149,19 @@ class DatabaseManager:
                 )
             """)
 
+            # 迁移：检查是否需要添加 hash_version 列
+            # v1.3.7 的 phash 实际是 dHash，v1.3.8 修正为真实 pHash（DCT），需要清理旧数据
+            try:
+                await cursor.execute(
+                    "ALTER TABLE image_hashes ADD COLUMN hash_version INTEGER DEFAULT 2"
+                )  # 默认值 2 对应 self.HASH_VERSION，此处需要 SQL 字面量
+                # 旧版 phash 数据（v1.3.7）不可信，清理
+                await cursor.execute("DELETE FROM image_hashes")
+                logger.debug("检测到旧版 image_hashes 表，已添加 hash_version 列并清理旧数据")
+            except aiosqlite.OperationalError:
+                # 列已存在，无需迁移
+                pass
+
             # 创建索引
             logger.debug("创建索引")
             await cursor.execute("""
@@ -189,12 +203,45 @@ class DatabaseManager:
         """
         return hashlib.md5(data).hexdigest()
 
-    async def check_whitelist(self, md5_hash: str) -> bool:
+    @staticmethod
+    def _calculate_expire_hours(
+        hit_count: int,
+        base_expire_hours: int = 2,
+        max_expire_days: int = 14,
+    ) -> int:
+        """
+        根据命中次数计算过期时间（指数增长，上限为最大天数）
+
+        每次命中增加50%过期时间，最多考虑10次命中
+
+        Args:
+            hit_count: 当前命中次数
+            base_expire_hours: 基础过期时间（小时）
+            max_expire_days: 最大过期时间（天）
+
+        Returns:
+            过期时间（小时）
+        """
+        return min(
+            int(base_expire_hours * (1.5 ** min(hit_count, 10))),
+            max_expire_days * 24,
+        )
+
+    async def check_whitelist(
+        self,
+        md5_hash: str,
+        base_expire_hours: int = 2,
+        max_expire_days: int = 14,
+        extend_on_hit: bool = True,
+    ) -> bool:
         """
         检查MD5是否在白名单中
 
         Args:
             md5_hash: MD5哈希值
+            base_expire_hours: 基础过期时间（小时），命中时用于延长
+            max_expire_days: 最大过期时间（天），命中时用于延长
+            extend_on_hit: 命中时是否延长过期时间
 
         Returns:
             是否在白名单中
@@ -230,25 +277,45 @@ class DatabaseManager:
                 await conn.commit()
                 return False
 
-            # 更新命中次数
+            # 更新命中次数并延长过期时间
             new_hit_count = hit_count + 1
-            logger.debug(
-                f"更新白名单命中次数，ID: {record_id}, 旧次数: {hit_count}, 新次数: {new_hit_count}"
-            )
-            await cursor.execute(
-                "UPDATE whitelist SET hit_count = ? WHERE id = ?",
-                (new_hit_count, record_id),
-            )
+            if extend_on_hit:
+                expire_hours = self._calculate_expire_hours(
+                    new_hit_count, base_expire_hours, max_expire_days
+                )
+                new_expires_at = datetime.now() + timedelta(hours=expire_hours)
+                logger.debug(
+                    f"更新白名单命中次数，ID: {record_id}, 旧次数: {hit_count}, "
+                    f"新次数: {new_hit_count}, 延长过期时间至: {new_expires_at}"
+                )
+                await cursor.execute(
+                    "UPDATE whitelist SET hit_count = ?, expires_at = ? WHERE id = ?",
+                    (new_hit_count, new_expires_at.isoformat(), record_id),
+                )
+            else:
+                await cursor.execute(
+                    "UPDATE whitelist SET hit_count = ? WHERE id = ?",
+                    (new_hit_count, record_id),
+                )
             await conn.commit()
             logger.debug(f"白名单检查通过，MD5: {md5_hash}")
             return True
 
-    async def check_blacklist(self, md5_hash: str) -> tuple[RiskLevel, str] | None:
+    async def check_blacklist(
+        self,
+        md5_hash: str,
+        base_expire_hours: int = 2,
+        max_expire_days: int = 14,
+        extend_on_hit: bool = True,
+    ) -> tuple[RiskLevel, str] | None:
         """
         检查MD5是否在黑名单中
 
         Args:
             md5_hash: MD5哈希值
+            base_expire_hours: 基础过期时间（小时），命中时用于延长
+            max_expire_days: 最大过期时间（天），命中时用于延长
+            extend_on_hit: 命中时是否延长过期时间
 
         Returns:
             如果存在返回(risk_level, risk_reason)，否则返回None
@@ -285,15 +352,26 @@ class DatabaseManager:
                 await conn.commit()
                 return None
 
-            # 更新命中次数
+            # 更新命中次数并延长过期时间
             new_hit_count = hit_count + 1
-            logger.debug(
-                f"更新黑名单命中次数，ID: {record_id}, 旧次数: {hit_count}, 新次数: {new_hit_count}"
-            )
-            await cursor.execute(
-                "UPDATE blacklist SET hit_count = ? WHERE id = ?",
-                (new_hit_count, record_id),
-            )
+            if extend_on_hit:
+                expire_hours = self._calculate_expire_hours(
+                    new_hit_count, base_expire_hours, max_expire_days
+                )
+                new_expires_at = datetime.now() + timedelta(hours=expire_hours)
+                logger.debug(
+                    f"更新黑名单命中次数，ID: {record_id}, 旧次数: {hit_count}, "
+                    f"新次数: {new_hit_count}, 延长过期时间至: {new_expires_at}"
+                )
+                await cursor.execute(
+                    "UPDATE blacklist SET hit_count = ?, expires_at = ? WHERE id = ?",
+                    (new_hit_count, new_expires_at.isoformat(), record_id),
+                )
+            else:
+                await cursor.execute(
+                    "UPDATE blacklist SET hit_count = ? WHERE id = ?",
+                    (new_hit_count, record_id),
+                )
             await conn.commit()
 
             risk_level_enum = RiskLevel(risk_level)
@@ -333,11 +411,8 @@ class DatabaseManager:
                 hit_count = result[0]
                 logger.debug(f"白名单中已存在，命中次数: {hit_count}")
                 # 每次命中增加50%过期时间，避免指数增长
-                expire_hours = min(
-                    int(
-                        base_expire_hours * (1.5 ** min(hit_count, 10))
-                    ),  # 限制最大10次翻倍
-                    max_expire_days * 24,
+                expire_hours = self._calculate_expire_hours(
+                    hit_count, base_expire_hours, max_expire_days
                 )
                 logger.debug(f"延长过期时间: {expire_hours}小时")
             else:
@@ -395,11 +470,8 @@ class DatabaseManager:
                 hit_count = result[0]
                 logger.debug(f"黑名单中已存在，命中次数: {hit_count}")
                 # 每次命中增加50%过期时间，避免指数增长
-                expire_hours = min(
-                    int(
-                        base_expire_hours * (1.5 ** min(hit_count, 10))
-                    ),  # 限制最大10次翻倍
-                    max_expire_days * 24,
+                expire_hours = self._calculate_expire_hours(
+                    hit_count, base_expire_hours, max_expire_days
                 )
                 logger.debug(f"延长过期时间: {expire_hours}小时")
             else:
@@ -668,9 +740,8 @@ class DatabaseManager:
             if result:
                 # 已存在，延长过期时间
                 hit_count = result[0]
-                expire_hours = min(
-                    int(base_expire_hours * (1.5 ** min(hit_count, 10))),
-                    max_expire_days * 24,
+                expire_hours = self._calculate_expire_hours(
+                    hit_count, base_expire_hours, max_expire_days
                 )
             else:
                 expire_hours = base_expire_hours
@@ -680,8 +751,8 @@ class DatabaseManager:
 
             await cursor.execute(
                 """INSERT OR REPLACE INTO image_hashes
-                   (md5_hash, phash, dhash, risk_level, risk_reason, expires_at, hit_count)
-                   VALUES (?, ?, ?, ?, ?, ?, COALESCE((SELECT hit_count FROM image_hashes WHERE md5_hash = ?), 0))""",
+                   (md5_hash, phash, dhash, risk_level, risk_reason, expires_at, hit_count, hash_version)
+                   VALUES (?, ?, ?, ?, ?, ?, COALESCE((SELECT hit_count FROM image_hashes WHERE md5_hash = ?), 0), ?)""",
                 (
                     md5_hash,
                     phash,
@@ -690,6 +761,7 @@ class DatabaseManager:
                     risk_reason,
                     expires_at.isoformat(),
                     md5_hash,
+                    self.HASH_VERSION,
                 ),
             )
             await conn.commit()
@@ -734,8 +806,8 @@ class DatabaseManager:
             await cursor.execute(
                 f"""SELECT md5_hash, {hash_column} as hash_value, risk_level, risk_reason, expires_at
                     FROM image_hashes
-                    WHERE {hash_column} IS NOT NULL AND expires_at > ?""",
-                (now,),
+                    WHERE {hash_column} IS NOT NULL AND hash_version = ? AND expires_at > ?""",
+                (self.HASH_VERSION, now),
             )
             rows = await cursor.fetchall()
 

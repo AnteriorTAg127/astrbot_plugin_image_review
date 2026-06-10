@@ -56,6 +56,11 @@ class AliyunCensor(CensorBase):
         """
         生成阿里云 ROA API 签名
 
+        签名格式（阿里云 ROA）：
+            HTTPMethod + "\\n" + Accept + "\\n" + Content-MD5 + "\\n"
+            + Content-Type + "\\n" + Date + "\\n"
+            + CanonicalizedHeaders + "\\n" + CanonicalizedResource
+
         Args:
             method: HTTP方法 (GET, POST, etc.)
             path: 请求路径
@@ -65,27 +70,43 @@ class AliyunCensor(CensorBase):
         Returns:
             添加签名后的请求头
         """
-        sign_headers = {}
-        for key, value in headers.items():
-            if key.startswith("x-ca-") or key in (
-                "content-type",
-                "content-md5",
-                "date",
-            ):
-                sign_headers[key.lower()] = value
-
+        # 构建 CanonicalizedResource
         sorted_query = sorted(query.items()) if query else []
         query_string = "&".join(f"{k}={v}" for k, v in sorted_query)
-
         canonicalized_resource = path
         if query_string:
             canonicalized_resource += "?" + query_string
 
+        # 不区分大小写读取标准头
+        def _get_header(headers: dict, name: str) -> str:
+            for k, v in headers.items():
+                if k.lower() == name.lower():
+                    return v
+            return ""
+
+        # 构建 CanonicalizedHeaders（所有 x-ca-* 头，按小写排序）
+        ca_headers: dict[str, str] = {}
+        for k, v in headers.items():
+            lower_k = k.lower()
+            if lower_k.startswith("x-ca-"):
+                ca_headers[lower_k] = v.strip()
+        canonicalized_headers = ""
+        for key in sorted(ca_headers):
+            canonicalized_headers += f"{key}:{ca_headers[key]}\n"
+
+        # Accept 通常为空
+        accept = ""
+        content_md5 = _get_header(headers, "Content-MD5")
+        content_type = _get_header(headers, "Content-Type")
+        date = _get_header(headers, "Date")
+
         string_to_sign = (
             f"{method}\n"
-            f"{sign_headers.get('content-type', '')}\n"
-            f"{sign_headers.get('content-md5', '')}\n"
-            f"{sign_headers.get('date', '')}\n"
+            f"{accept}\n"
+            f"{content_md5}\n"
+            f"{content_type}\n"
+            f"{date}\n"
+            f"{canonicalized_headers}"
             f"{canonicalized_resource}"
         )
 

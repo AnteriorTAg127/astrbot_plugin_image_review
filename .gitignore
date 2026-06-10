@@ -209,3 +209,6 @@ __marimo__/
 # Local files that should not be uploaded
 .trae/rules/astr.md
 .trae/rules/
+
+# Claude Code internal files
+.claude/

@@ -315,7 +315,7 @@ class CensorFlow:
             disable_auto_whitelist = self._config.get("disable_auto_whitelist", False)
             if not disable_auto_whitelist:
                 logger.debug("检查自动白名单")
-                if await self._db.check_whitelist(md5_hash):
+                if await self._db.check_whitelist(md5_hash, expire_hours, expire_days):
                     logger.debug(f"图片在自动白名单中，MD5: {md5_hash}")
                     return RiskLevel.Pass, "白名单图片", md5_hash, downloaded_image_data
             else:
@@ -325,7 +325,7 @@ class CensorFlow:
             disable_auto_blacklist = self._config.get("disable_auto_blacklist", False)
             if not disable_auto_blacklist:
                 logger.debug("检查自动黑名单")
-                blacklist_result = await self._db.check_blacklist(md5_hash)
+                blacklist_result = await self._db.check_blacklist(md5_hash, expire_hours, expire_days)
                 if blacklist_result:
                     risk_level, risk_reason = blacklist_result
                     logger.debug(
@@ -361,7 +361,7 @@ class CensorFlow:
                         "similarity_hash_algorithm", "phash"
                     )
                     hamming_threshold = self._config.get(
-                        "similarity_hamming_threshold", 10
+                        "similarity_hamming_threshold", 29
                     )
 
                     # 选择要使用的哈希值
@@ -425,7 +425,18 @@ class CensorFlow:
             )
             logger.debug(f"图片检测: 是否为动图={is_animated}, 帧数={frame_count}")
 
-            # 如果是动图且启用了动图增强检测，直接使用动图检测
+            # 普通静图检测（始终执行，确保 risk_level 一定有值）
+            logger.debug("使用普通静图检测")
+            image_input = image_url
+            risk_level, risk_words = await self._image_censor.detect_image(
+                image_input, downloaded_image_data
+            )
+            risk_reason = ", ".join(risk_words) if risk_words else ""
+            logger.debug(
+                f"静图检测完成，风险等级: {risk_level.name}, 原因: {risk_reason}"
+            )
+
+            # 如果是动图且启用了动图增强检测，覆盖动图检测结果
             if (
                 is_animated
                 and frame_count > 1
@@ -436,31 +447,18 @@ class CensorFlow:
                 logger.info(f"检测到多帧动图，帧数: {frame_count}，启动动图增强检测")
                 try:
                     (
-                        risk_level,
-                        risk_reason,
+                        gif_risk_level,
+                        gif_risk_reason,
                     ) = await self._gif_censor.detect_animated_image(
                         downloaded_image_data
                     )
+                    risk_level, risk_reason = gif_risk_level, gif_risk_reason
                     logger.debug(
                         f"动图检测完成，风险等级: {risk_level.name}, 原因: {risk_reason}"
                     )
                 except Exception as e:
                     logger.error(f"动图增强检测异常: {e}")
-                    # 动图检测异常时降级为普通静图检测
-                    logger.warning("动图检测异常，降级为静图检测")
-                    is_animated = False
-
-            # 如果不是动图或动图检测未启用/失败，进行普通静图检测
-            if not is_animated or frame_count <= 1:
-                logger.debug("使用普通静图检测")
-                image_input = image_url
-                risk_level, risk_words = await self._image_censor.detect_image(
-                    image_input, downloaded_image_data
-                )
-                risk_reason = ", ".join(risk_words) if risk_words else ""
-                logger.debug(
-                    f"静图检测完成，风险等级: {risk_level.name}, 原因: {risk_reason}"
-                )
+                    # GIF检测失败，保留静图检测结果
 
             # 7. 根据审核结果更新自动黑白名单（如果未关闭）
             if risk_level == RiskLevel.Pass:
@@ -474,27 +472,6 @@ class CensorFlow:
                     logger.debug("添加到自动白名单完成")
                 else:
                     logger.debug("自动白名单已禁用，不添加到白名单")
-
-                # 如果启用了相似图片匹配，保存哈希到数据库
-                if enable_similarity and downloaded_image_data is not None:
-                    try:
-                        # 如果之前没有计算哈希，现在计算
-                        if not phash and not dhash:
-                            phash, dhash = await asyncio.to_thread(
-                                ImageUtils.calculate_image_hashes, downloaded_image_data
-                            )
-                        await self._db.add_image_hash(
-                            md5_hash,
-                            phash,
-                            dhash,
-                            risk_level=None,  # 白名单图片risk_level为None
-                            risk_reason=None,
-                            base_expire_hours=expire_hours,
-                            max_expire_days=expire_days,
-                        )
-                        logger.debug(f"保存白名单图片哈希完成，MD5: {md5_hash}")
-                    except Exception as e:
-                        logger.debug(f"保存白名单图片哈希失败: {e}")
 
             elif risk_level in (RiskLevel.Review, RiskLevel.Block):
                 if not disable_auto_blacklist:
@@ -512,26 +489,30 @@ class CensorFlow:
                 else:
                     logger.debug("自动黑名单已禁用，不添加到黑名单")
 
-                # 如果启用了相似图片匹配，保存哈希到数据库
-                if enable_similarity and downloaded_image_data is not None:
-                    try:
-                        # 如果之前没有计算哈希，现在计算
-                        if not phash and not dhash:
-                            phash, dhash = await asyncio.to_thread(
-                                ImageUtils.calculate_image_hashes, downloaded_image_data
-                            )
-                        await self._db.add_image_hash(
-                            md5_hash,
-                            phash,
-                            dhash,
-                            risk_level=risk_level,
-                            risk_reason=risk_reason,
-                            base_expire_hours=expire_hours,
-                            max_expire_days=expire_days,
+            # 如果启用了相似图片匹配，保存哈希到数据库
+            if enable_similarity and downloaded_image_data is not None:
+                try:
+                    # 如果之前没有计算哈希，现在计算
+                    if not phash and not dhash:
+                        phash, dhash = await asyncio.to_thread(
+                            ImageUtils.calculate_image_hashes, downloaded_image_data
                         )
-                        logger.debug(f"保存黑名单图片哈希完成，MD5: {md5_hash}")
-                    except Exception as e:
-                        logger.debug(f"保存黑名单图片哈希失败: {e}")
+                    # 根据审核结果决定保存的风险等级
+                    save_risk_level = None if risk_level == RiskLevel.Pass else risk_level
+                    save_risk_reason = None if risk_level == RiskLevel.Pass else risk_reason
+                    await self._db.add_image_hash(
+                        md5_hash,
+                        phash,
+                        dhash,
+                        risk_level=save_risk_level,
+                        risk_reason=save_risk_reason,
+                        base_expire_hours=expire_hours,
+                        max_expire_days=expire_days,
+                    )
+                    log_msg = "白名单" if risk_level == RiskLevel.Pass else "黑名单"
+                    logger.debug(f"保存{log_msg}图片哈希完成，MD5: {md5_hash}")
+                except Exception as e:
+                    logger.debug(f"保存图片哈希失败: {e}")
 
             logger.debug(
                 f"图片审核流程完成，最终结果: 风险等级={risk_level.name}, 原因={risk_reason}, MD5={md5_hash}"
