@@ -2221,11 +2221,44 @@ class DatabaseManager:
 
     # ========== 证据图片回填（v1.5.0） ==========
 
+    @staticmethod
+    def _index_evidence_files(
+        evidence_dir: str,
+    ) -> tuple[dict[tuple[str, str, str], str], dict[str, str]]:
+        """扫描证据目录建立两级索引（供回填与运行时兜底共用）
+
+        证据文件命名格式: {group}_{user}_{timestamp}_{md5前8位}.ext
+        （timestamp 形如 20260101_120000，内部含下划线，故 md5 前缀取末段）
+
+        Returns:
+            (精确索引 (group, user, md5前缀) -> 路径, 前缀索引 md5前缀 -> 路径)
+        """
+        exact_map: dict[tuple[str, str, str], str] = {}
+        prefix_map: dict[str, str] = {}
+        try:
+            names = os.listdir(evidence_dir)
+        except OSError:
+            return exact_map, prefix_map
+        for fname in names:
+            base = os.path.splitext(fname)[0]
+            parts = base.rsplit("_", 1)
+            if len(parts) != 2 or len(parts[1]) != 8:
+                continue
+            prefix = parts[1].lower()
+            full = os.path.join(evidence_dir, fname)
+            # 群号/用户ID 为纯数字，文件名前两段即 group/user
+            head = parts[0].split("_")
+            if len(head) >= 2:
+                exact_map.setdefault((head[0], head[1], prefix), full)
+            prefix_map.setdefault(prefix, full)
+        return exact_map, prefix_map
+
     async def backfill_evidence_paths(self, evidence_dir: str) -> int:
         """尽力回填旧违规记录的证据图片路径（幂等）。
 
-        证据文件命名格式: {group}_{user}_{timestamp}_{md5前8位}.ext，
-        据此把文件路径写回 violation_records.evidence_path（仅处理空值记录）。
+        两级匹配：优先 {group}_{user}_*_{md5前8位} 精确命中，
+        其次仅 md5 前缀命中（同图多次违规时可能复用同一证据，属预期兜底）。
+        仅处理 evidence_path 为空的记录。
         """
         import logging
 
@@ -2234,13 +2267,7 @@ class DatabaseManager:
             return 0
         await self._init_db()
 
-        # 建立 md5 前缀 -> 文件路径 索引
-        prefix_map: dict[str, str] = {}
-        for fname in os.listdir(evidence_dir):
-            base = os.path.splitext(fname)[0]
-            parts = base.rsplit("_", 1)
-            if len(parts) == 2 and len(parts[1]) == 8:
-                prefix_map[parts[1].lower()] = os.path.join(evidence_dir, fname)
+        exact_map, prefix_map = self._index_evidence_files(evidence_dir)
         if not prefix_map:
             return 0
 
@@ -2249,14 +2276,17 @@ class DatabaseManager:
             async with aiosqlite.connect(self._db_path) as conn:
                 cursor = await conn.cursor()
                 await cursor.execute(
-                    "SELECT id, md5_hash FROM violation_records "
+                    "SELECT id, group_id, user_id, md5_hash FROM violation_records "
                     "WHERE evidence_path IS NULL OR evidence_path = ''"
                 )
                 rows = await cursor.fetchall()
-                for row_id, md5_hash in rows:
+                for row_id, row_group, row_user, md5_hash in rows:
                     if not md5_hash:
                         continue
-                    path = prefix_map.get(md5_hash[:8].lower())
+                    prefix = md5_hash[:8].lower()
+                    path = exact_map.get(
+                        (str(row_group or ""), str(row_user or ""), prefix)
+                    ) or prefix_map.get(prefix)
                     if path and os.path.isfile(path):
                         await cursor.execute(
                             "UPDATE violation_records SET evidence_path = ? WHERE id = ?",
@@ -2269,3 +2299,14 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"证据图片回填失败: {e}")
         return filled
+
+    async def set_violation_evidence_path(self, vid: int, path: str) -> None:
+        """写回运行时解析出的证据路径（懒回填，WebUI 图片兜底查找后调用）"""
+        await self._init_db()
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute(
+                "UPDATE violation_records SET evidence_path = ? WHERE id = ?",
+                (path, vid),
+            )
+            await conn.commit()

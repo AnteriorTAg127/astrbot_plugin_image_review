@@ -392,6 +392,9 @@ class WebApiHandler:
     async def api_violations_image(self, vid: str) -> Any:
         """GET /violations/<vid>/image 返回证据图片（Pillow 压缩至最长边 1024px，base64）。
 
+        图片来源**仅为本地证据文件**（QQ 图片 URL 会过期，不作为来源）；
+        记录无路径时按文件名模式兜底查找并写回（懒回填）。
+
         响应：无证据 ``{has_evidence: false}``；有证据
         ``{has_evidence: true, mime: "image/jpeg", data: <base64>}``。
         """
@@ -400,8 +403,12 @@ class WebApiHandler:
             if err is not None:
                 return err
             path = await self._db.get_violation_evidence_path(vid_int)
-            if not path:
-                return json_response({"has_evidence": False})
+
+            # 路径缺失或文件已不存在：按记录字段兜底查找本地证据（懒回填）
+            if not path or not os.path.isfile(path):
+                path = await self._resolve_evidence_fallback(vid_int)
+                if not path:
+                    return json_response({"has_evidence": False})
 
             # 路径安全校验：realpath 必须位于证据目录内，防路径遍历
             real_path = os.path.realpath(path)
@@ -452,6 +459,43 @@ class WebApiHandler:
         except Exception:
             logger.exception("[web_api] api_violations_image failed")
             return error_response("internal error", status_code=500)
+
+    async def _resolve_evidence_fallback(self, vid: int) -> str | None:
+        """evidence_path 缺失时按违规记录字段查找本地证据文件，并写回 DB（懒回填）
+
+        QQ 图片 URL 会过期，本地证据文件是违规图片的唯一可靠来源；
+        此兜底保证无路径记录的旧数据（或启动回填未命中的记录）
+        在本地存在证据文件时仍可正常展示。
+
+        查找规则与启动回填一致：优先 {group}_{user}_*_{md5前8位}.ext 精确命中，
+        其次仅 md5 前缀命中。
+        """
+        record = await self._db.get_violation(vid)
+        if not record:
+            return None
+        md5_hash = record.get("md5_hash") or ""
+        if not md5_hash or not os.path.isdir(self._evidence_dir):
+            return None
+        prefix = md5_hash[:8].lower()
+        exact_map, prefix_map = DatabaseManager._index_evidence_files(
+            self._evidence_dir
+        )
+        path = exact_map.get(
+            (
+                str(record.get("group_id") or ""),
+                str(record.get("user_id") or ""),
+                prefix,
+            )
+        ) or prefix_map.get(prefix)
+        if path and os.path.isfile(path):
+            try:
+                await self._db.set_violation_evidence_path(vid, path)
+            except Exception:
+                logger.exception(
+                    f"[web_api] persist fallback evidence path failed: vid={vid}"
+                )
+            return path
+        return None
 
     # ------------------------------------------------------------------ #
     # 审核日志
