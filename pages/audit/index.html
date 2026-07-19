@@ -541,7 +541,7 @@ tbody tr:hover { background: var(--surface-2); }
               var lbl = (m.model_id || "").length > 18 ? truncate(m.model_id, 18) : (m.model_id || "-");
               card.appendChild(el("div", { class: "label", text: lbl }));
               card.appendChild(el("div", { class: "value", style: "font-size:22px;", text: (m.total_cost || 0).toFixed(4) + " " + (m.currency || "") }));
-              card.appendChild(el("div", { class: "label", style: "margin-top:4px;", text: "调用 " + (m.call_count || 0) + "次 | 输入 " + (m.total_input_other||0)+(/ 缓存 " + (m.total_input_cached||0)+"/) + "/ 输出 " + (m.total_output||0) }));
+              card.appendChild(el("div", { class: "label", style: "margin-top:4px;", text: "调用 " + (m.call_count || 0) + " 次 | 输入 " + (m.total_input_other || 0) + " / 缓存 " + (m.total_input_cached || 0) + " / 输出 " + (m.total_output || 0) }));
               costGrid.appendChild(card);
             });
             content.appendChild(costGrid);
