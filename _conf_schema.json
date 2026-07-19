@@ -60,6 +60,12 @@
         "hint": "启用后禁用系统的自动黑名单判定机制，所有黑名单判定仅基于人工配置数据",
         "default": false
     },
+    "enable_account_whitelist": {
+        "type": "bool",
+        "description": "启用账号白名单",
+        "hint": "开启后，账号白名单中的 QQ 账号将跳过图片审核。支持全局白名单（所有群生效）与群级白名单（仅指定群生效），通过管理群指令或 WebUI 管理",
+        "default": true
+    },
     "enable_similarity_match": {
         "type": "bool",
         "description": "是否启用相似图片匹配",

@@ -241,6 +241,31 @@ class WebApiHandler:
                 ["POST"],
                 "删除用户档案",
             ),
+            # 账号白名单（v1.5.1）
+            (
+                f"{prefix}/account_whitelist",
+                self.api_account_whitelist_list,
+                ["GET"],
+                "账号白名单列表",
+            ),
+            (
+                f"{prefix}/account_whitelist",
+                self.api_account_whitelist_create,
+                ["POST"],
+                "添加账号白名单",
+            ),
+            (
+                f"{prefix}/account_whitelist/<wid>/update",
+                self.api_account_whitelist_update,
+                ["POST"],
+                "更新账号白名单备注",
+            ),
+            (
+                f"{prefix}/account_whitelist/<wid>/delete",
+                self.api_account_whitelist_delete,
+                ["POST"],
+                "删除账号白名单",
+            ),
         ]
         ok_cnt = 0
         for route, handler, methods, desc in routes:
@@ -878,4 +903,89 @@ class WebApiHandler:
             return json_response({})
         except Exception:
             logger.exception("[web_api] api_users_delete failed")
+            return error_response("internal error", status_code=500)
+
+    # ------------------------------------------------------------------ #
+    # 账号白名单（v1.5.1：QQ 账号维度，支持全局与群级）
+    # ------------------------------------------------------------------ #
+
+    async def api_account_whitelist_list(self) -> Any:
+        """GET /account_whitelist?group_id=&sort_by=&sort_dir=
+
+        group_id: all/缺省=全部, global=仅全局, 具体群号=该群
+        """
+        try:
+            items = await self._db.list_account_whitelist_detailed(
+                group_id_filter=_parse_group_id_filter(request.query.get("group_id")),
+                sort_by=request.query.get("sort_by") or None,
+                sort_dir=request.query.get("sort_dir") or None,
+            )
+            return json_response({"items": items, "total": len(items)})
+        except Exception:
+            logger.exception("[web_api] api_account_whitelist_list failed")
+            return error_response("internal error", status_code=500)
+
+    async def api_account_whitelist_create(self) -> Any:
+        """POST /account_whitelist  body: {user_id, group_id?, note?}"""
+        try:
+            payload = await _json_body()
+            user_id = str(payload.get("user_id") or "").strip()
+            if not user_id:
+                return error_response("user_id is required", status_code=400)
+            group_id = str(payload.get("group_id") or "")
+            note = str(payload.get("note") or "")
+            added_by = request.username or "webui"
+            ok = await self._db.add_account_whitelist(
+                user_id=user_id,
+                group_id=group_id,
+                added_by=added_by,
+                note=note or None,
+            )
+            if not ok:
+                return error_response("entry already exists", status_code=409)
+            logger.info(
+                f"[web_api] add_account_whitelist by {added_by}: "
+                f"user_id={user_id} group_id={group_id or 'global'}"
+            )
+            return json_response({})
+        except Exception:
+            logger.exception("[web_api] api_account_whitelist_create failed")
+            return error_response("internal error", status_code=500)
+
+    async def api_account_whitelist_update(self, wid: str) -> Any:
+        """POST /account_whitelist/<wid>/update  body: {note}"""
+        try:
+            wid_int, err = _id_or_400(wid)
+            if err is not None:
+                return err
+            payload = await _json_body()
+            if "note" not in payload:
+                return error_response("note is required", status_code=400)
+            note = str(payload.get("note") or "")
+            ok = await self._db.update_account_whitelist_note(wid_int, note)
+            if not ok:
+                return error_response("not found", status_code=404)
+            logger.info(
+                f"[web_api] update_account_whitelist by {_current_user()}: id={wid_int}"
+            )
+            return json_response({})
+        except Exception:
+            logger.exception("[web_api] api_account_whitelist_update failed")
+            return error_response("internal error", status_code=500)
+
+    async def api_account_whitelist_delete(self, wid: str) -> Any:
+        """POST /account_whitelist/<wid>/delete"""
+        try:
+            wid_int, err = _id_or_400(wid)
+            if err is not None:
+                return err
+            ok = await self._db.delete_account_whitelist_by_id(wid_int)
+            if not ok:
+                return error_response("not found", status_code=404)
+            logger.info(
+                f"[web_api] delete_account_whitelist by {_current_user()}: id={wid_int}"
+            )
+            return json_response({})
+        except Exception:
+            logger.exception("[web_api] api_account_whitelist_delete failed")
             return error_response("internal error", status_code=500)

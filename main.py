@@ -23,7 +23,7 @@ from .utils import ImageUtils, MessageUtils
     "image_review",
     "AnteriorTAg127",
     "图片审核插件，提供图片内容审核、违规处理、管理群通知等功能",
-    "1.5.0",
+    "1.5.1",
 )
 class ImageReviewPlugin(Star):
     """图片审核插件主类"""
@@ -186,6 +186,12 @@ class ImageReviewPlugin(Star):
             )
             if not should_enable:
                 return
+
+            # 账号白名单检查（全局或本群条目命中即跳过审核，v1.5.1）
+            if self._config.get("enable_account_whitelist", True):
+                if await self._db.check_account_whitelist(user_id, group_id):
+                    logger.debug(f"用户 {user_id} 在账号白名单中，跳过审核")
+                    return
 
             # 获取群配置
             group_config = self._config_manager.get_group_config(group_id)
@@ -1219,6 +1225,147 @@ class ImageReviewPlugin(Star):
             logger.error(f"移除自动黑名单异常: {e}")
             yield event.plain_result(f"❌ 操作失败: {str(e)}")
 
+    @filter.command("添加账号白名单")
+    async def add_account_whitelist_cmd(
+        self, event: AstrMessageEvent, qq_str: str = "", group_arg: str = ""
+    ):
+        """添加 QQ 账号到白名单（管理群专用；末位 [群号|all] 指定范围，缺省全局）"""
+        try:
+            manage_group_id = (
+                str(event.get_group_id()) if event.get_group_id() else None
+            )
+            if not manage_group_id:
+                return
+            self._config_manager.maybe_reload()
+            if not self._config_manager.is_manage_group(manage_group_id):
+                return
+            if not await self._check_admin_permission(event, manage_group_id):
+                yield event.plain_result(
+                    "❌ 您没有执行此命令的权限，需要管理员或群主身份"
+                )
+                return
+            qq = qq_str.strip()
+            if not qq:
+                yield event.plain_result("使用方法: /添加账号白名单 <QQ号> [群号|all]")
+                return
+            # 范围解析：all/缺省=全局；具体群号须绑定到本管理群
+            ga = group_arg.strip()
+            if ga in ("", "all"):
+                scope = ""
+            else:
+                managed = self._config_manager.get_group_ids_by_manage_group(
+                    manage_group_id
+                )
+                if ga not in managed:
+                    yield event.plain_result(f"⚠️ 群 {ga} 未绑定到本管理群")
+                    return
+                scope = ga
+            added_by = str(event.get_sender_id())
+            success = await self._db.add_account_whitelist(
+                qq, group_id=scope, added_by=added_by
+            )
+            if success:
+                scope_str = "全局" if not scope else f"群 {scope} 的"
+                yield event.plain_result(f"✅ 已将用户 {qq} 加入{scope_str}账号白名单")
+            else:
+                yield event.plain_result("⚠️ 该用户已在该范围的账号白名单中")
+        except Exception as e:
+            logger.error(f"添加账号白名单异常: {e}")
+            yield event.plain_result(f"❌ 操作失败: {str(e)}")
+
+    @filter.command("移除账号白名单")
+    async def remove_account_whitelist_cmd(
+        self, event: AstrMessageEvent, qq_str: str = "", group_arg: str = ""
+    ):
+        """从账号白名单移除 QQ 账号（管理群专用；[群号|all] 指定范围，缺省全部范围）"""
+        try:
+            manage_group_id = (
+                str(event.get_group_id()) if event.get_group_id() else None
+            )
+            if not manage_group_id:
+                return
+            self._config_manager.maybe_reload()
+            if not self._config_manager.is_manage_group(manage_group_id):
+                return
+            if not await self._check_admin_permission(event, manage_group_id):
+                yield event.plain_result(
+                    "❌ 您没有执行此命令的权限，需要管理员或群主身份"
+                )
+                return
+            qq = qq_str.strip()
+            if not qq:
+                yield event.plain_result("使用方法: /移除账号白名单 <QQ号> [群号|all]")
+                return
+            # 范围解析：all/缺省=全部范围；具体群号须绑定到本管理群
+            ga = group_arg.strip()
+            if ga in ("", "all"):
+                scope: str | None = None
+            else:
+                managed = self._config_manager.get_group_ids_by_manage_group(
+                    manage_group_id
+                )
+                if ga not in managed:
+                    yield event.plain_result(f"⚠️ 群 {ga} 未绑定到本管理群")
+                    return
+                scope = ga
+            success = await self._db.remove_account_whitelist(qq, scope)
+            if success:
+                scope_str = "全部范围" if scope is None else f"群 {scope} 范围"
+                yield event.plain_result(
+                    f"✅ 已将用户 {qq} 从{scope_str}账号白名单移除"
+                )
+            else:
+                yield event.plain_result("⚠️ 该用户不在该范围的账号白名单中")
+        except Exception as e:
+            logger.error(f"移除账号白名单异常: {e}")
+            yield event.plain_result(f"❌ 操作失败: {str(e)}")
+
+    @filter.command("账号白名单列表")
+    async def account_whitelist_list_cmd(
+        self, event: AstrMessageEvent, group_arg: str = ""
+    ):
+        """列出账号白名单（管理群专用；[群号|all]：all/缺省=全局，群号=该群）"""
+        try:
+            manage_group_id = (
+                str(event.get_group_id()) if event.get_group_id() else None
+            )
+            if not manage_group_id:
+                return
+            self._config_manager.maybe_reload()
+            if not self._config_manager.is_manage_group(manage_group_id):
+                return
+            if not await self._check_admin_permission(event, manage_group_id):
+                yield event.plain_result(
+                    "❌ 您没有执行此命令的权限，需要管理员或群主身份"
+                )
+                return
+            ga = group_arg.strip()
+            if ga in ("", "all"):
+                scope = ""
+                label = "全局"
+            else:
+                managed = self._config_manager.get_group_ids_by_manage_group(
+                    manage_group_id
+                )
+                if ga not in managed:
+                    yield event.plain_result(f"⚠️ 群 {ga} 未绑定到本管理群")
+                    return
+                scope = ga
+                label = f"群 {ga}"
+            users = await self._db.get_account_whitelist_by_group(scope)
+            if not users:
+                yield event.plain_result(f"📋 账号白名单（{label}）\n暂无白名单用户")
+                return
+            lines = [f"📋 账号白名单（{label}）"]
+            for i, uid in enumerate(users[:50], 1):
+                lines.append(f"{i}. {uid}")
+            if len(users) > 50:
+                lines.append(f"... 共 {len(users)} 条，仅显示前 50 条")
+            yield event.plain_result("\n".join(lines))
+        except Exception as e:
+            logger.error(f"账号白名单列表异常: {e}")
+            yield event.plain_result(f"❌ 操作失败: {str(e)}")
+
     @filter.command("审查帮助")
     async def review_help(self, event: AstrMessageEvent):
         """显示图片审核插件帮助信息"""
@@ -1269,6 +1416,15 @@ class ImageReviewPlugin(Star):
                 "━━━━━━━━━━━━━━━\n"
                 "/移除自动白名单 - 移除自动白名单(需引用)\n"
                 "/移除自动黑名单 - 移除自动黑名单(需引用)\n"
+                "\n"
+                "【账号白名单】\n"
+                "━━━━━━━━━━━━━━━\n"
+                "白名单中的 QQ 账号跳过图片审核\n"
+                "/添加账号白名单 <QQ号> [群号|all] - 添加账号\n"
+                "  缺省/all=全局生效，群号=仅该群生效\n"
+                "/移除账号白名单 <QQ号> [群号|all] - 移除账号\n"
+                "  缺省/all=移除全部范围\n"
+                "/账号白名单列表 [群号|all] - 查看列表\n"
                 "\n"
                 "【WebUI 管理面板】\n"
                 "━━━━━━━━━━━━━━━\n"

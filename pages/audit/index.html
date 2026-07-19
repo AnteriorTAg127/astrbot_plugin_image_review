@@ -146,6 +146,7 @@ tbody tr:hover { background: var(--surface-2); }
     <div class="tab" data-tab="audits">审核日志</div>
     <div class="tab" data-tab="whitelist">白名单</div>
     <div class="tab" data-tab="blacklist">黑名单</div>
+    <div class="tab" data-tab="account_whitelist">账号白名单</div>
     <div class="tab" data-tab="users">违规档案</div>
   </nav>
   <main class="panel" id="content">
@@ -164,6 +165,7 @@ tbody tr:hover { background: var(--surface-2); }
     audits: { page: 1, page_size: 20, group_id: "", risk_level: "", keyword: "", items: [], total: 0, selected: {}, date_from: "", date_to: "", sort_by: "", sort_dir: "" },
     whitelist: { items: [], total: 0, group_id_filter: "", sort_by: "", sort_dir: "" },
     blacklist: { items: [], total: 0, group_id_filter: "", sort_by: "", sort_dir: "" },
+    account_wl: { items: [], total: 0, group_id_filter: "", sort_by: "", sort_dir: "" },
     users: { page: 1, page_size: 20, keyword: "", status: "", items: [], total: 0, first_seen_from: "", first_seen_to: "", last_seen_from: "", last_seen_to: "", groups: [], sort_by: "", sort_dir: "" }
   };
 
@@ -295,6 +297,7 @@ tbody tr:hover { background: var(--surface-2); }
     if (state.tab === "audits") return renderAudits();
     if (state.tab === "whitelist") return renderWhitelist();
     if (state.tab === "blacklist") return renderBlacklist();
+    if (state.tab === "account_whitelist") return renderAccountWhitelist();
     if (state.tab === "users") return renderUsers();
   }
 
@@ -762,8 +765,8 @@ tbody tr:hover { background: var(--surface-2); }
     });
   }
 
-  // 证据图片查看：优先走 violations/<id>/image（base64 data URI），
-  // API 失败或无证据时降级为 image_url 直连，再没有则提示无证据图片
+  // 证据图片查看：仅从本地证据文件加载（violations/<id>/image 返回 base64 data URI）。
+  // QQ 图片 URL 有效期仅约 60 分钟，绝不作为图片来源，不做链接降级。
   async function openViolationImage(row) {
     var holder = el("div", { class: "loading-overlay", html: '<span class="spinner"></span> 图片加载中...' });
     showModal({
@@ -771,31 +774,29 @@ tbody tr:hover { background: var(--surface-2); }
       content: holder,
       actions: [{ label: "关闭", handler: closeModal }]
     });
-    var dataUri = null;
+    function showFail(msg) {
+      holder.innerHTML = "";
+      holder.className = "";
+      holder.appendChild(el("div", { class: "empty", text: msg }));
+    }
+    var resp = null;
     try {
-      var data = await apiGet("violations/" + row.id + "/image");
-      if (data && data.has_evidence && data.data) {
-        var mime = (data.mime && String(data.mime).indexOf("image/") === 0) ? String(data.mime) : "image/jpeg";
-        dataUri = "data:" + mime + ";base64," + data.data;
-      }
-    } catch (e) { /* 走降级分支 */ }
+      resp = await apiGet("violations/" + row.id + "/image");
+    } catch (e) {
+      showFail("加载证据图片失败: " + (e.message || e));
+      return;
+    }
+    if (!resp || !resp.has_evidence || !resp.data) {
+      showFail("无本地证据图片");
+      return;
+    }
+    var mime = (resp.mime && String(resp.mime).indexOf("image/") === 0) ? String(resp.mime) : "image/jpeg";
     holder.innerHTML = "";
     holder.className = "";
-    if (dataUri) {
-      var img = el("img", { class: "evidence-img" });
-      img.setAttribute("src", dataUri);
-      holder.appendChild(img);
-    } else if (row.image_url && String(row.image_url).indexOf("http") === 0) {
-      var img2 = el("img", { class: "evidence-img" });
-      img2.setAttribute("src", row.image_url);
-      img2.addEventListener("error", function(){
-        holder.textContent = "图片加载失败（原 URL 不可访问）：" + row.image_url;
-      });
-      holder.appendChild(img2);
-      holder.appendChild(el("div", { class: "empty", style: "padding:8px;", text: "已降级显示原始 URL（无本地证据缓存）" }));
-    } else {
-      holder.appendChild(el("div", { class: "empty", text: "无证据图片" }));
-    }
+    var img = el("img", { class: "evidence-img" });
+    img.addEventListener("error", function(){ showFail("图片数据无法渲染"); });
+    img.setAttribute("src", "data:" + mime + ";base64," + resp.data);
+    holder.appendChild(img);
   }
 
   async function renderAudits() {
@@ -1118,6 +1119,162 @@ tbody tr:hover { background: var(--surface-2); }
             toast("已保存", "success");
             closeModal();
             renderWhitelist();
+          } catch (e) { toast("保存失败: " + (e.message || e), "error"); }
+        }}
+      ]
+    });
+  }
+
+  async function renderAccountWhitelist() {
+    var content = $("#content");
+    var s = state.account_wl;
+    await fetchGroups();
+    var filter = el("div", { class: "filter-bar" });
+    var selGid = makeGroupSelect(s.group_id_filter, true);
+    filter.appendChild(selGid);
+    filter.appendChild(makeButton("搜索", "btn-primary", function(){
+      s.group_id_filter = selGid.value;
+      renderAccountWhitelist();
+    }));
+
+    var toolbar = el("div", { class: "toolbar" });
+    var btnAdd = el("button", { class: "btn btn-primary", text: "+ 新增" });
+    btnAdd.addEventListener("click", openCreateAccountWhitelist);
+    toolbar.appendChild(btnAdd);
+    var info = el("div", { class: "info", text: "共 " + s.total + " 项" });
+    toolbar.appendChild(info);
+
+    content.innerHTML = "";
+    content.appendChild(filter);
+    content.appendChild(toolbar);
+    var loading = el("div", { class: "loading-overlay", html: '<span class="spinner"></span> 加载中...' });
+    content.appendChild(loading);
+
+    try {
+      var data = await apiGet("account_whitelist", {
+        group_id: s.group_id_filter === "" ? "all" : s.group_id_filter,
+        sort_by: s.sort_by || undefined,
+        sort_dir: s.sort_dir || undefined
+      });
+      s.items = (data && data.items) || [];
+      s.total = (data && data.total) || s.items.length;
+      info.textContent = "共 " + s.total + " 项";
+      content.removeChild(loading);
+
+      var wrap = el("div", { class: "table-wrap" });
+      var tbl = el("table");
+      var thead = el("thead");
+      var trh = el("tr");
+      var onSort = function(){ renderAccountWhitelist(); };
+      trh.appendChild(makeSortTh("ID", "id", s, "account_wl", onSort));
+      trh.appendChild(makeSortTh("QQ号", "user_id", s, "account_wl", onSort));
+      trh.appendChild(makeSortTh("范围", "group_id", s, "account_wl", onSort));
+      trh.appendChild(makeSortTh("添加人", null, s, "account_wl", onSort));
+      trh.appendChild(makeSortTh("备注", null, s, "account_wl", onSort));
+      trh.appendChild(makeSortTh("添加时间", "created_at", s, "account_wl", onSort));
+      trh.appendChild(makeSortTh("操作", null, s, "account_wl", onSort));
+      thead.appendChild(trh);
+      tbl.appendChild(thead);
+      var tbody = el("tbody");
+      if (s.items.length === 0) {
+        var trE = el("tr");
+        var tdE = el("td", { text: "暂无数据" });
+        tdE.setAttribute("colspan", 7);
+        tdE.style.textAlign = "center";
+        tdE.style.color = "var(--text-2)";
+        trE.appendChild(tdE);
+        tbody.appendChild(trE);
+      } else {
+        s.items.forEach(function(row){
+          var tr = el("tr");
+          var tdId = el("td", { text: String(row.id) }); tdId.setAttribute("data-label", "ID"); tr.appendChild(tdId);
+          var tdU = el("td", { text: row.user_id || "" }); tdU.setAttribute("data-label", "QQ号"); tr.appendChild(tdU);
+          var tdG = el("td", { text: row.group_id ? row.group_id : "全局" }); tdG.setAttribute("data-label", "范围"); tr.appendChild(tdG);
+          var tdBy = el("td", { text: row.added_by || "-" }); tdBy.setAttribute("data-label", "添加人"); tr.appendChild(tdBy);
+          var tdN = el("td", { text: row.note || "-" }); tdN.setAttribute("data-label", "备注"); tr.appendChild(tdN);
+          var tdT = el("td", { text: fmtTime(row.created_at) }); tdT.setAttribute("data-label", "添加时间"); tr.appendChild(tdT);
+          var tdOps = el("td"); tdOps.setAttribute("data-label", "操作");
+          var btnEdit = el("button", { class: "btn btn-sm", text: "改备注" });
+          btnEdit.addEventListener("click", function(){ openEditAccountWhitelist(row); });
+          var btnDel = el("button", { class: "btn btn-sm btn-danger", text: "删" });
+          btnDel.style.marginLeft = "4px";
+          btnDel.addEventListener("click", function(){
+            confirmDialog("确认从账号白名单删除 QQ:" + (row.user_id || "") + " ？", async function(){
+              try {
+                await apiDelete("account_whitelist/" + row.id);
+                toast("已删除", "success");
+                renderAccountWhitelist();
+              } catch (e) { toast("删除失败: " + (e.message || e), "error"); }
+            });
+          });
+          tdOps.appendChild(btnEdit); tdOps.appendChild(btnDel);
+          tr.appendChild(tdOps);
+          tbody.appendChild(tr);
+        });
+      }
+      tbl.appendChild(tbody);
+      wrap.appendChild(tbl);
+      content.appendChild(wrap);
+    } catch (e) {
+      if (loading.parentNode) loading.parentNode.removeChild(loading);
+      content.appendChild(el("div", { class: "empty", text: "加载失败: " + (e.message || e) }));
+      toast("加载账号白名单失败: " + (e.message || e), "error");
+    }
+  }
+
+  function openCreateAccountWhitelist() {
+    var form = el("div");
+    form.appendChild(makeFormRow("QQ号", "user_id", ""));
+    // 群选择：全局（空=全局） + 各群
+    var groupRow = el("div", { class: "form-row" });
+    groupRow.appendChild(el("label", { text: "群（空=全局）" }));
+    var gSel = el("select", { name: "group_id" });
+    gSel.appendChild(el("option", { value: "", text: "全局" }));
+    (groupsCache || []).forEach(function(g){
+      var label = (g.group_name || g.group_id) + " (" + g.group_id + ")";
+      gSel.appendChild(el("option", { value: g.group_id, text: label }));
+    });
+    groupRow.appendChild(gSel);
+    form.appendChild(groupRow);
+    form.appendChild(makeFormRow("备注", "note", "", true));
+    showModal({
+      title: "添加账号白名单",
+      content: form,
+      actions: [
+        { label: "取消", handler: closeModal },
+        { label: "保存", cls: "btn-primary", handler: async function(){
+          var uid = form.querySelector('[name="user_id"]').value.trim();
+          if (!uid) { toast("请输入 QQ 号", "error"); return; }
+          var body = {
+            user_id: uid,
+            group_id: form.querySelector('[name="group_id"]').value,
+            note: form.querySelector('[name="note"]').value
+          };
+          try {
+            await apiPost("account_whitelist", body);
+            toast("已添加", "success");
+            closeModal();
+            renderAccountWhitelist();
+          } catch (e) { toast("添加失败: " + (e.message || e), "error"); }
+        }}
+      ]
+    });
+  }
+  function openEditAccountWhitelist(row) {
+    var form = el("div");
+    form.appendChild(makeFormRow("备注", "note", row.note || "", true));
+    showModal({
+      title: "编辑账号白名单备注 #" + row.id,
+      content: form,
+      actions: [
+        { label: "取消", handler: closeModal },
+        { label: "保存", cls: "btn-primary", handler: async function(){
+          var note = form.querySelector('[name="note"]').value;
+          try {
+            await apiUpdate("account_whitelist/" + row.id, { note: note });
+            toast("已保存", "success");
+            closeModal();
+            renderAccountWhitelist();
           } catch (e) { toast("保存失败: " + (e.message || e), "error"); }
         }}
       ]
@@ -1540,6 +1697,7 @@ tbody tr:hover { background: var(--surface-2); }
     loadSort("audits", state.audits);
     loadSort("whitelist", state.whitelist);
     loadSort("blacklist", state.blacklist);
+    loadSort("account_wl", state.account_wl);
     loadSort("users", state.users);
     bindTabs();
     render();

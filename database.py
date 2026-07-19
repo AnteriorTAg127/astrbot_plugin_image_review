@@ -255,6 +255,20 @@ class DatabaseManager:
                 )
             """)
 
+            # 账号白名单表（v1.5.1 新增：白名单 QQ 账号跳过审核，支持全局与群级）
+            logger.debug("创建账号白名单表")
+            await cursor.execute("""
+                CREATE TABLE IF NOT EXISTS account_whitelist (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    group_id TEXT NOT NULL DEFAULT '',
+                    added_by TEXT,
+                    note TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, group_id)
+                )
+            """)
+
             # 创建索引
             logger.debug("创建索引")
             await cursor.execute("""
@@ -2048,6 +2062,132 @@ class DatabaseManager:
             await cursor.execute(
                 "DELETE FROM user_profiles WHERE user_id = ?", (user_id,)
             )
+            await conn.commit()
+            return cursor.rowcount > 0
+
+    # ========== 账号白名单（v1.5.1 新增：QQ 账号维度，支持全局与群级） ==========
+
+    async def check_account_whitelist(self, user_id: str, group_id: str = "") -> bool:
+        """检查 QQ 账号是否在白名单中（全局条目或指定群条目命中即跳过审核）"""
+        await self._init_db()
+
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute(
+                """SELECT 1 FROM account_whitelist
+                   WHERE user_id = ? AND (group_id = '' OR group_id = ?) LIMIT 1""",
+                (user_id, group_id),
+            )
+            return (await cursor.fetchone()) is not None
+
+    async def add_account_whitelist(
+        self,
+        user_id: str,
+        group_id: str = "",
+        added_by: str = None,
+        note: str = None,
+    ) -> bool:
+        """添加账号白名单（group_id='' 表示全局；(user_id, group_id) 唯一）"""
+        await self._init_db()
+
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+            try:
+                await cursor.execute(
+                    """INSERT INTO account_whitelist (user_id, group_id, added_by, note)
+                       VALUES (?, ?, ?, ?)""",
+                    (user_id, group_id or "", added_by, note),
+                )
+                await conn.commit()
+                return True
+            except aiosqlite.IntegrityError:
+                return False
+
+    async def remove_account_whitelist(
+        self, user_id: str, group_id: str | None = None
+    ) -> bool:
+        """移除账号白名单
+
+        Args:
+            user_id: QQ 号
+            group_id: None=移除该账号全部范围条目；''=仅全局条目；群号=仅该群条目
+        """
+        await self._init_db()
+
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+            if group_id is None:
+                await cursor.execute(
+                    "DELETE FROM account_whitelist WHERE user_id = ?", (user_id,)
+                )
+            else:
+                await cursor.execute(
+                    "DELETE FROM account_whitelist WHERE user_id = ? AND group_id = ?",
+                    (user_id, group_id),
+                )
+            await conn.commit()
+            return cursor.rowcount > 0
+
+    async def get_account_whitelist_by_group(self, group_id: str = "") -> list[str]:
+        """获取指定范围（默认全局）的白名单 QQ 号列表"""
+        await self._init_db()
+
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute(
+                "SELECT user_id FROM account_whitelist WHERE group_id = ? ORDER BY created_at DESC",
+                (group_id,),
+            )
+            return [row[0] for row in await cursor.fetchall()]
+
+    async def list_account_whitelist_detailed(
+        self,
+        group_id_filter: str | None = None,
+        sort_by: str | None = None,
+        sort_dir: str | None = None,
+    ) -> list[dict]:
+        """账号白名单详细列表。group_id_filter: None=全部, 'global'=仅全局, 群号=该群"""
+        await self._init_db()
+
+        clauses: list[str] = []
+        params: list = []
+        if group_id_filter is not None:
+            if group_id_filter == "global":
+                clauses.append("group_id = ''")
+            else:
+                clauses.append("group_id = ?")
+                params.append(group_id_filter)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        order_clause = _build_order_clause(
+            sort_by, sort_dir, _LIST_SORT_FIELDS, "ORDER BY created_at DESC", "id"
+        )
+        async with aiosqlite.connect(self._db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.cursor()
+            await cursor.execute(
+                f"SELECT * FROM account_whitelist {where} {order_clause}", params
+            )
+            return [dict(r) for r in await cursor.fetchall()]
+
+    async def update_account_whitelist_note(self, wid: int, note: str) -> bool:
+        """更新账号白名单备注"""
+        await self._init_db()
+
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute(
+                "UPDATE account_whitelist SET note = ? WHERE id = ?", (note, wid)
+            )
+            await conn.commit()
+            return cursor.rowcount > 0
+
+    async def delete_account_whitelist_by_id(self, wid: int) -> bool:
+        """按 ID 删除账号白名单条目"""
+        await self._init_db()
+
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute("DELETE FROM account_whitelist WHERE id = ?", (wid,))
             await conn.commit()
             return cursor.rowcount > 0
 
