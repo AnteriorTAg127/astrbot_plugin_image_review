@@ -23,7 +23,7 @@ from .utils import ImageUtils, MessageUtils
     "image_review",
     "AnteriorTAg127",
     "图片审核插件，提供图片内容审核、违规处理、管理群通知等功能",
-    "1.5.3",
+    "1.5.4",
 )
 class ImageReviewPlugin(Star):
     """图片审核插件主类"""
@@ -94,7 +94,7 @@ class ImageReviewPlugin(Star):
                 from .web_api import WebApiHandler
 
                 self._web_api = WebApiHandler(
-                    self._db, self._config_manager, self._evidence_dir
+                    self._db, self._config_manager, self._evidence_dir, self.context
                 )
                 self._web_api.register(self.context)
             except Exception:
@@ -116,6 +116,10 @@ class ImageReviewPlugin(Star):
                 deleted = await self._db.cleanup_audit_log(keep_days=30)
                 if deleted:
                     logger.info(f"审核日志清理完成，删除 {deleted} 条过期记录")
+                # v1.5.4: LLM 成本日志保留 30 天
+                cost_deleted = await self._db.cleanup_cost_log(keep_days=30)
+                if cost_deleted:
+                    logger.info(f"成本日志清理完成，删除 {cost_deleted} 条过期记录")
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -250,8 +254,22 @@ class ImageReviewPlugin(Star):
                 group_config.get("max_expire_days", 14) if group_config else 14
             )
 
+            # 预加载全部模型定价表（v1.5.4 成本记账用，一次 DB 查所有避免循环内 N 次查询）
+            pricing_map = (
+                {p["model_id"]: p for p in await self._db.list_model_pricing()}
+                if self._config.get("image_censor_provider") in ("VLAI", None)
+                else {}
+            )
+
             # 顺序处理所有图片（避免并发过高）
             for image_url, image_md5 in images_to_check:
+                usages: list = []
+
+                def usage_sink(pid, u):
+                    usages.append((pid, u))
+
+                if not pricing_map:
+                    usage_sink = None
                 try:
                     # 进行图片审核
                     (
@@ -265,6 +283,7 @@ class ImageReviewPlugin(Star):
                         precalculated_md5=image_md5,
                         base_expire_hours=base_expire_hours,
                         max_expire_days=max_expire_days,
+                        usage_sink=usage_sink,
                     )
 
                     # 记录审核日志（无论结果如何，供 WebUI 统计与浏览，v1.5.0）
@@ -311,6 +330,26 @@ class ImageReviewPlugin(Star):
                     logger.error(f"图片审核异常: {e}")
                 except Exception as e:
                     logger.error(f"处理图片异常: {e}")
+
+                # v1.5.4：成本记账（遍历本次审核中所有 LLM 调用，对其用量按配置单价算成本）
+                for upid, usage in usages:
+                    pricing = pricing_map.get(upid)
+                    if not usage or not pricing:
+                        continue
+                    try:
+                        await self._db.record_cost(
+                            upid,
+                            pricing["currency"],
+                            pricing["price_per"],
+                            pricing["input_price"],
+                            pricing["cached_price"],
+                            pricing["output_price"],
+                            usage.input_other,
+                            usage.input_cached,
+                            usage.output,
+                        )
+                    except Exception as e:
+                        logger.debug(f"记录 LLM 成本失败: {e}")
 
         except CensorError as e:
             logger.error(f"图片审核异常: {e}")

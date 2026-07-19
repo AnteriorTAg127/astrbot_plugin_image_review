@@ -191,6 +191,7 @@ class CensorFlow:
         precalculated_md5: str | None = None,
         base_expire_hours: int | None = None,
         max_expire_days: int | None = None,
+        usage_sink=None,
     ) -> tuple[RiskLevel, str, str | None, bytes | None]:
         """
         提交图片进行审核
@@ -384,7 +385,7 @@ class CensorFlow:
             image_input = image_url
             try:
                 risk_level, risk_words = await self._image_censor.detect_image(
-                    image_input, downloaded_image_data
+                    image_input, downloaded_image_data, usage_sink
                 )
             except CensorError as e:
                 # 非公网 URL（如本地路径）且审核器需要公网 URL（如 Aliyun 2.0 baselineCheck
@@ -420,7 +421,7 @@ class CensorFlow:
                         gif_risk_level,
                         gif_risk_reason,
                     ) = await self._gif_censor.detect_animated_image(
-                        downloaded_image_data
+                        downloaded_image_data, usage_sink
                     )
                     risk_level, risk_reason = gif_risk_level, gif_risk_reason
                     logger.debug(

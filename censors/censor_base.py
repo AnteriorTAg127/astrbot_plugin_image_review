@@ -51,7 +51,10 @@ class CensorBase(ABC):
 
     @abstractmethod
     async def detect_image(
-        self, image: str, image_data: bytes | None = None
+        self,
+        image: str,
+        image_data: bytes | None = None,
+        usage_sink: "Any | None" = None,
     ) -> tuple[RiskLevel, set[str]]:
         """
         检测图片内容
@@ -59,6 +62,9 @@ class CensorBase(ABC):
         Args:
             image: 图片URL或base64字符串
             image_data: 已下载的图片数据（可选，如果提供则跳过下载）
+            usage_sink: 可选用量收集回调，签名 ``usage_sink(provider_id, usage)``，
+                每次 LLM 调用成功后上报（provider_id 为实际应答的提供商，
+                usage 为框架 TokenUsage，可能为 None）。用于成本统计。
 
         Returns:
             (风险等级, 风险描述集合)

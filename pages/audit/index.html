@@ -149,6 +149,7 @@ tbody tr:hover { background: var(--surface-2); }
     <div class="tab" data-tab="whitelist">白名单</div>
     <div class="tab" data-tab="blacklist">黑名单</div>
     <div class="tab" data-tab="account_whitelist">账号白名单</div>
+    <div class="tab" data-tab="pricing">成本配置</div>
     <div class="tab" data-tab="users">违规档案</div>
   </nav>
   <main class="panel" id="content">
@@ -168,6 +169,7 @@ tbody tr:hover { background: var(--surface-2); }
     whitelist: { items: [], total: 0, group_id_filter: "", sort_by: "", sort_dir: "" },
     blacklist: { items: [], total: 0, group_id_filter: "", sort_by: "", sort_dir: "" },
     account_wl: { items: [], total: 0, group_id_filter: "", sort_by: "", sort_dir: "" },
+    pricing: { items: [], total: 0 },
     users: { page: 1, page_size: 20, keyword: "", status: "", items: [], total: 0, first_seen_from: "", first_seen_to: "", last_seen_from: "", last_seen_to: "", groups: [], sort_by: "", sort_dir: "" }
   };
 
@@ -300,6 +302,7 @@ tbody tr:hover { background: var(--surface-2); }
     if (state.tab === "whitelist") return renderWhitelist();
     if (state.tab === "blacklist") return renderBlacklist();
     if (state.tab === "account_whitelist") return renderAccountWhitelist();
+    if (state.tab === "pricing") return renderPricing();
     if (state.tab === "users") return renderUsers();
   }
 
@@ -523,6 +526,53 @@ tbody tr:hover { background: var(--surface-2); }
       legend.appendChild(li1);
       legend.appendChild(li2);
       content.appendChild(legend);
+
+      // v1.5.4：成本概览
+      try {
+        var costData = await apiGet("cost/overview");
+        var models = costData.models || [];
+        var currTotals = costData.total_by_currency || [];
+        if (models.length > 0 || currTotals.length > 0) {
+          content.appendChild(el("div", { class: "section-title", text: "成本概览 (LLM)" }));
+          if (models.length > 0) {
+            var costGrid = el("div", { class: "stat-grid", style: "grid-template-columns: repeat(" + Math.min(4, models.length) + ", 1fr)" });
+            models.forEach(function(m){
+              var card = el("div", { class: "stat-card" });
+              var lbl = (m.model_id || "").length > 18 ? truncate(m.model_id, 18) : (m.model_id || "-");
+              card.appendChild(el("div", { class: "label", text: lbl }));
+              card.appendChild(el("div", { class: "value", style: "font-size:22px;", text: (m.total_cost || 0).toFixed(4) + " " + (m.currency || "") }));
+              card.appendChild(el("div", { class: "label", style: "margin-top:4px;", text: "调用 " + (m.call_count || 0) + "次 | 输入 " + (m.total_input_other||0)+(/ 缓存 " + (m.total_input_cached||0)+"/) + "/ 输出 " + (m.total_output||0) }));
+              costGrid.appendChild(card);
+            });
+            content.appendChild(costGrid);
+          }
+          if (currTotals.length > 0) {
+            var totalLine = el("div", { style: "padding:6px 0;font-size:13px;color:var(--text-2);text-align:center;" });
+            totalLine.appendChild(document.createTextNode("按货币汇总: " + currTotals.map(function(t){ return t.total_cost.toFixed(4) + " " + t.currency; }).join(" | ")));
+            content.appendChild(totalLine);
+          }
+          // 近 7 天成本趋势
+          var costTrend = costData.trend_7days || [];
+          if (costTrend.length > 0) {
+            content.appendChild(el("div", { class: "section-title", style: "margin-top:8px;", text: "近 7 天费用趋势" }));
+            var maxC = 1; costTrend.forEach(function(d){ if (d.cost > maxC) maxC = d.cost; });
+            var ctChart = el("div", { class: "chart", style: "height:120px;" });
+            costTrend.forEach(function(d){
+              var day = el("div", { class: "chart-day" });
+              var bar = el("div", { class: "chart-bars" });
+              var b = el("div", { class: "chart-bar", style: "background:var(--info);" });
+              b.style.height = maxC > 0 ? Math.max(1, Math.round(d.cost / maxC * 100)) + "%" : "0%";
+              b.title = d.cost.toFixed(4);
+              bar.appendChild(b);
+              day.appendChild(bar);
+              day.appendChild(el("div", { class: "chart-label", text: (d.date || "").slice(5) }));
+              ctChart.appendChild(day);
+            });
+            content.appendChild(ctChart);
+          }
+          content.appendChild(el("div", { style: "margin-bottom:12px;" }));
+        }
+      } catch (e) { /* 成本加载失败不影响概览其余内容 */ }
 
       // 双栏：Top 10 违规用户 + 各群分布
       var dual = el("div", { class: "dual-col" });
@@ -1319,6 +1369,135 @@ tbody tr:hover { background: var(--surface-2); }
         }}
       ]
     });
+  }
+
+  // ── 成本配置 Tab（v1.5.4） ──────────────────────────────────────
+  var providersCache = null;
+  async function fetchProviders() {
+    if (providersCache) return providersCache;
+    try { providersCache = await apiGet("providers") || []; } catch (e) { providersCache = []; }
+    return providersCache;
+  }
+  async function renderPricing() {
+    var content = $("#content");
+    var s = state.pricing;
+    await fetchProviders();
+    var toolbar = el("div", { class: "toolbar" });
+    var btnAdd = el("button", { class: "btn btn-primary", text: "+ 新增定价" });
+    btnAdd.addEventListener("click", openCreatePricing);
+    toolbar.appendChild(btnAdd);
+    toolbar.appendChild(el("div", { class: "info", text: "共 " + s.total + " 项" }));
+    content.innerHTML = "";
+    content.appendChild(toolbar);
+    var loading = el("div", { class: "loading-overlay", html: '<span class="spinner"></span> 加载中...' });
+    content.appendChild(loading);
+    try {
+      var data = await apiGet("pricing");
+      s.items = (data && data.items) || [];
+      s.total = (data && data.total) || s.items.length;
+      toolbar.querySelector(".info").textContent = "共 " + s.total + " 项";
+      content.removeChild(loading);
+      if (s.items.length === 0) {
+        content.appendChild(el("div", { class: "empty", text: "暂无定价配置，点击「+ 新增定价」添加" }));
+        return;
+      }
+      var wrap = el("div", { class: "table-wrap" });
+      var tbl = el("table");
+      var thead = el("thead");
+      var trh = el("tr");
+      ["模型ID", "货币", "计价单位", "输入价", "缓存价", "输出价", "标签", "更新时间", "操作"].forEach(function(h){ trh.appendChild(el("th", { text: h })); });
+      thead.appendChild(trh); tbl.appendChild(thead);
+      var tbody = el("tbody");
+      s.items.forEach(function(row){
+        var tr = el("tr");
+        var pp = row.price_per || 1000000;
+        var unit = pp >= 1000000 ? "每 1M tokens" : "每 " + pp + " tokens";
+        [row.model_id, row.currency || "CNY", unit, row.input_price||0, row.cached_price||0, row.output_price||0,
+         row.label || "-", fmtTime(row.updated_at)].forEach(function(v,i){
+           var td = el("td", { text: String(v) });
+           td.setAttribute("data-label", ["模型ID","货币","计价单位","输入价","缓存价","输出价","标签","更新时间","操作"][i]);
+           tr.appendChild(td);
+         });
+        var tdOps = el("td"); tdOps.setAttribute("data-label", "操作");
+        var btnEdit = el("button", { class: "btn btn-sm", text: "改" });
+        btnEdit.addEventListener("click", function(){ openEditPricing(row); });
+        var btnDel = el("button", { class: "btn btn-sm btn-danger", text: "删" });
+        btnDel.style.marginLeft = "4px";
+        btnDel.addEventListener("click", function(){
+          confirmDialog("确认删除模型 " + row.model_id + " 的定价？", async function(){
+            try { await apiDelete("pricing/" + encodeURIComponent(row.model_id)); toast("已删除", "success"); renderPricing(); }
+            catch (e) { toast("删除失败: " + (e.message||e), "error"); }
+          });
+        });
+        tdOps.appendChild(btnEdit); tdOps.appendChild(btnDel);
+        tr.appendChild(tdOps); tbody.appendChild(tr);
+      });
+      tbl.appendChild(tbody); wrap.appendChild(tbl); content.appendChild(wrap);
+    } catch (e) {
+      if (loading.parentNode) loading.parentNode.removeChild(loading);
+      content.appendChild(el("div", { class: "empty", text: "加载失败: " + (e.message || e) }));
+    }
+  }
+  function pricingForm(row, editMode) {
+    // row: existing data or empty; editMode: true if editing existing (no model_id field)
+    var form = el("div");
+    if (!editMode) {
+      var selRow = el("div", { class: "form-row" });
+      selRow.appendChild(el("label", { text: "模型（LLM 提供商）" }));
+      var sel = el("select", { name: "model_id" });
+      (providersCache || []).forEach(function(p){
+        var label = p.id + (p.type ? " (" + p.type + ")" : "");
+        sel.appendChild(el("option", { value: p.id, text: label }));
+      });
+      if (row.model_id) sel.value = row.model_id;
+      selRow.appendChild(sel); form.appendChild(selRow);
+    }
+    form.appendChild(makeFormRow("货币 (如 CNY/USD)", "currency", row.currency || "CNY"));
+    var ppRow = el("div", { class: "form-row" });
+    ppRow.appendChild(el("label", { text: "计价单位" }));
+    var ppSel = el("select", { name: "price_per" });
+    ppSel.appendChild(el("option", { value: "1000", text: "每 1K tokens" }));
+    ppSel.appendChild(el("option", { value: "1000000", text: "每 1M tokens" }));
+    ppSel.value = String(row.price_per || 1000000);
+    ppRow.appendChild(ppSel); form.appendChild(ppRow);
+    form.appendChild(makeFormRow("输入价格", "input_price", row.input_price || ""));
+    form.appendChild(makeFormRow("缓存价格（默认=输入价）", "cached_price", row.cached_price != null ? row.cached_price : (row.input_price || "")));
+    form.appendChild(makeFormRow("输出价格", "output_price", row.output_price || ""));
+    form.appendChild(makeFormRow("标签（可选）", "label", row.label || "", true));
+    return form;
+  }
+  function openCreatePricing() { var form = pricingForm({input_price:"",cached_price:"",output_price:"",currency:"CNY",price_per:1000000,label:""}, false);
+    showModal({ title: "新增模型定价", content: form, actions: [
+      { label: "取消", handler: closeModal },
+      { label: "保存", cls: "btn-primary", handler: async function(){
+        var body = { model_id: form.querySelector('[name="model_id"]').value.trim(),
+          currency: form.querySelector('[name="currency"]').value,
+          price_per: parseInt(form.querySelector('[name="price_per"]').value,10),
+          input_price: parseFloat(form.querySelector('[name="input_price"]').value)||0,
+          cached_price: parseFloat(form.querySelector('[name="cached_price"]').value)||0,
+          output_price: parseFloat(form.querySelector('[name="output_price"]').value)||0,
+          label: form.querySelector('[name="label"]').value };
+        if (!body.model_id) { toast("请选择模型", "error"); return; }
+        try { await apiPost("pricing", body); toast("已保存", "success"); closeModal(); renderPricing(); }
+        catch (e) { toast("保存失败: " + (e.message||e), "error"); }
+      }}
+    ]});
+  }
+  function openEditPricing(row) { var form = pricingForm(row, true);
+    showModal({ title: "编辑定价 " + row.model_id, content: form, actions: [
+      { label: "取消", handler: closeModal },
+      { label: "保存", cls: "btn-primary", handler: async function(){
+        var body = { model_id: row.model_id,
+          currency: form.querySelector('[name="currency"]').value,
+          price_per: parseInt(form.querySelector('[name="price_per"]').value,10),
+          input_price: parseFloat(form.querySelector('[name="input_price"]').value)||0,
+          cached_price: parseFloat(form.querySelector('[name="cached_price"]').value)||0,
+          output_price: parseFloat(form.querySelector('[name="output_price"]').value)||0,
+          label: form.querySelector('[name="label"]').value };
+        try { await apiPost("pricing", body); toast("已保存", "success"); closeModal(); renderPricing(); }
+        catch (e) { toast("保存失败: " + (e.message||e), "error"); }
+      }}
+    ]});
   }
 
   async function renderBlacklist() {

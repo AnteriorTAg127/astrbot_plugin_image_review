@@ -269,6 +269,52 @@ class DatabaseManager:
                 )
             """)
 
+            # 模型定价表（v1.5.4：按 provider_id 配置输入/缓存/输出单价）
+            logger.debug("创建模型定价表")
+            await cursor.execute("""
+                CREATE TABLE IF NOT EXISTS model_pricing (
+                    model_id TEXT PRIMARY KEY,
+                    currency TEXT NOT NULL DEFAULT 'CNY',
+                    price_per INTEGER NOT NULL DEFAULT 1000000,
+                    input_price REAL NOT NULL DEFAULT 0,
+                    cached_price REAL NOT NULL DEFAULT 0,
+                    output_price REAL NOT NULL DEFAULT 0,
+                    label TEXT DEFAULT '',
+                    updated_at TEXT
+                )
+            """)
+
+            # LLM 成本日志表（v1.5.4：每次 LLM 调用一条，供趋势图与审计）
+            logger.debug("创建 LLM 成本日志表")
+            await cursor.execute("""
+                CREATE TABLE IF NOT EXISTS llm_cost_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    model_id TEXT NOT NULL,
+                    currency TEXT NOT NULL DEFAULT 'CNY',
+                    price_per INTEGER NOT NULL DEFAULT 1000000,
+                    input_other INTEGER NOT NULL DEFAULT 0,
+                    input_cached INTEGER NOT NULL DEFAULT 0,
+                    output INTEGER NOT NULL DEFAULT 0,
+                    cost REAL NOT NULL DEFAULT 0,
+                    created_at TEXT
+                )
+            """)
+
+            # 模型成本累计表（v1.5.4：按 model_id 汇总，永不清理，概览页用）
+            logger.debug("创建模型成本累计表")
+            await cursor.execute("""
+                CREATE TABLE IF NOT EXISTS model_cost_total (
+                    model_id TEXT PRIMARY KEY,
+                    currency TEXT NOT NULL DEFAULT 'CNY',
+                    total_input_other INTEGER NOT NULL DEFAULT 0,
+                    total_input_cached INTEGER NOT NULL DEFAULT 0,
+                    total_output INTEGER NOT NULL DEFAULT 0,
+                    total_cost REAL NOT NULL DEFAULT 0,
+                    call_count INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT
+                )
+            """)
+
             # 创建索引
             logger.debug("创建索引")
             await cursor.execute("""
@@ -2198,6 +2244,193 @@ class DatabaseManager:
             await cursor.execute("DELETE FROM account_whitelist WHERE id = ?", (wid,))
             await conn.commit()
             return cursor.rowcount > 0
+
+    # ========== 成本计算（v1.5.4：模型定价 + LLM 用量记账 + 概览查询） ==========
+
+    async def upsert_model_pricing(self, model_id: str, data: dict) -> bool:
+        """插入或更新模型定价（按 model_id 唯一）"""
+        await self._init_db()
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute(
+                """INSERT INTO model_pricing (model_id, currency, price_per,
+                   input_price, cached_price, output_price, label, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(model_id) DO UPDATE SET
+                   currency=excluded.currency, price_per=excluded.price_per,
+                   input_price=excluded.input_price, cached_price=excluded.cached_price,
+                   output_price=excluded.output_price, label=excluded.label,
+                   updated_at=excluded.updated_at""",
+                (
+                    model_id,
+                    data.get("currency", "CNY"),
+                    data.get("price_per", 1000000),
+                    data.get("input_price", 0),
+                    data.get("cached_price", 0),
+                    data.get("output_price", 0),
+                    data.get("label", ""),
+                    datetime.now().isoformat(),
+                ),
+            )
+            await conn.commit()
+            return cursor.rowcount > 0
+
+    async def get_model_pricing(self, model_id: str) -> dict | None:
+        """获取单个模型定价"""
+        await self._init_db()
+        async with aiosqlite.connect(self._db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.cursor()
+            await cursor.execute(
+                "SELECT * FROM model_pricing WHERE model_id = ?", (model_id,)
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def list_model_pricing(self) -> list[dict]:
+        """列出全部模型定价"""
+        await self._init_db()
+        async with aiosqlite.connect(self._db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.cursor()
+            await cursor.execute("SELECT * FROM model_pricing ORDER BY updated_at DESC")
+            return [dict(r) for r in await cursor.fetchall()]
+
+    async def delete_model_pricing(self, model_id: str) -> bool:
+        """删除某模型的定价"""
+        await self._init_db()
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute(
+                "DELETE FROM model_pricing WHERE model_id = ?", (model_id,)
+            )
+            await conn.commit()
+            return cursor.rowcount > 0
+
+    async def record_cost(
+        self,
+        model_id: str,
+        currency: str,
+        price_per: int,
+        input_price: float,
+        cached_price: float,
+        output_price: float,
+        input_other: int,
+        input_cached: int,
+        output: int,
+    ) -> None:
+        """记录一次 LLM 调用成本（写日志 + 累加到累计表）"""
+        cost = (
+            input_other * input_price
+            + input_cached * cached_price
+            + output * output_price
+        ) / price_per
+        now = datetime.now().isoformat()
+        await self._init_db()
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute(
+                """INSERT INTO llm_cost_log
+                   (model_id, currency, price_per, input_other, input_cached, output, cost, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    model_id,
+                    currency,
+                    price_per,
+                    input_other,
+                    input_cached,
+                    output,
+                    cost,
+                    now,
+                ),
+            )
+            await cursor.execute(
+                """INSERT INTO model_cost_total
+                   (model_id, currency, total_input_other, total_input_cached,
+                    total_output, total_cost, call_count, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+                   ON CONFLICT(model_id) DO UPDATE SET
+                   currency=excluded.currency,
+                   total_input_other=total_input_other+excluded.total_input_other,
+                   total_input_cached=total_input_cached+excluded.total_input_cached,
+                   total_output=total_output+excluded.total_output,
+                   total_cost=total_cost+excluded.total_cost,
+                   call_count=call_count+1,
+                   updated_at=excluded.updated_at""",
+                (model_id, currency, input_other, input_cached, output, cost, now),
+            )
+            await conn.commit()
+
+    async def get_cost_overview(self) -> dict:
+        """成本概览：各模型累计 + 按货币汇总 + 7 日费用趋势"""
+        await self._init_db()
+        empty = {
+            "models": [],
+            "total_by_currency": [],
+            "trend_7days": [],
+            "total_calls": 0,
+        }
+        try:
+            async with aiosqlite.connect(self._db_path) as conn:
+                conn.row_factory = aiosqlite.Row
+                cursor = await conn.cursor()
+                await cursor.execute(
+                    "SELECT * FROM model_cost_total ORDER BY total_cost DESC"
+                )
+                models = [dict(r) for r in await cursor.fetchall()]
+                total_calls = sum(m.get("call_count", 0) for m in models)
+                # 按货币汇总
+                currency_totals: dict[str, float] = {}
+                for m in models:
+                    c = m.get("currency", "CNY")
+                    currency_totals[c] = round(
+                        currency_totals.get(c, 0) + m.get("total_cost", 0), 4
+                    )
+                total_by_currency = [
+                    {"currency": k, "total_cost": v} for k, v in currency_totals.items()
+                ]
+                # 7 日趋势（按天汇总 llm_cost_log）
+                today = date.today()
+                start = (today - timedelta(days=6)).isoformat()
+                await cursor.execute(
+                    "SELECT date(created_at) AS d, SUM(cost) AS c FROM llm_cost_log "
+                    "WHERE date(created_at) >= date(?) GROUP BY d",
+                    (start,),
+                )
+                cost_map = {
+                    r["d"]: round(r["c"] or 0, 4) for r in await cursor.fetchall()
+                }
+                trend = []
+                for i in range(6, -1, -1):
+                    d_str = (today - timedelta(days=i)).isoformat()
+                    trend.append({"date": d_str, "cost": cost_map.get(d_str, 0)})
+                return {
+                    "models": models,
+                    "total_by_currency": total_by_currency,
+                    "trend_7days": trend,
+                    "total_calls": total_calls,
+                }
+        except Exception:
+            return empty
+
+    async def cleanup_cost_log(self, keep_days: int = 30) -> int:
+        """清理过期的 LLM 成本日志（累计表不受影响）"""
+        import logging
+
+        logger = logging.getLogger(__name__)
+        await self._init_db()
+        try:
+            cutoff = (datetime.now() - timedelta(days=keep_days)).isoformat()
+            async with aiosqlite.connect(self._db_path) as conn:
+                cursor = await conn.cursor()
+                await cursor.execute(
+                    "DELETE FROM llm_cost_log WHERE created_at < ?", (cutoff,)
+                )
+                await conn.commit()
+                return cursor.rowcount
+        except Exception as e:
+            logger.error(f"清理成本日志失败: {e}")
+            return 0
 
     # ========== WebUI：概览统计 ==========
 

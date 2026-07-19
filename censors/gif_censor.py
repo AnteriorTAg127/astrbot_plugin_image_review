@@ -227,12 +227,15 @@ class GIFCensor:
 
         return base64_data, mime_type
 
-    async def detect_animated_image(self, image_data: bytes) -> tuple[RiskLevel, str]:
+    async def detect_animated_image(
+        self, image_data: bytes, usage_sink=None
+    ) -> tuple[RiskLevel, str]:
         """
         检测动图内容（多帧采样检测）
 
         Args:
             image_data: 图片字节数据
+            usage_sink: 可选用量收集回调（见 CensorBase.detect_image）
 
         Returns:
             (风险等级, 风险原因)
@@ -262,16 +265,16 @@ class GIFCensor:
 
             # 根据检测模式选择检测方式
             if self._detection_mode == "batch":
-                return await self._detect_batch(frames)
+                return await self._detect_batch(frames, usage_sink)
             else:
-                return await self._detect_separate(frames)
+                return await self._detect_separate(frames, usage_sink)
 
         except Exception as e:
             logger.error(f"动图检测异常: {e}")
             raise CensorError(f"动图检测异常: {e}")
 
     async def _detect_separate(
-        self, frames: list[tuple[str, str]]
+        self, frames: list[tuple[str, str]], usage_sink=None
     ) -> tuple[RiskLevel, str]:
         """
         逐帧分开检测模式 - 多次调用模型，更精确
@@ -316,6 +319,7 @@ class GIFCensor:
                         ),
                         timeout=30.0,
                     )
+                    used_pid = provider_id
                     logger.debug(f"第 {i + 1} 帧主提供商调用完成")
                 except Exception as primary_error:
                     # 主提供商失败，尝试备用提供商
@@ -331,6 +335,7 @@ class GIFCensor:
                                 ),
                                 timeout=30.0,
                             )
+                            used_pid = self._backup_provider_id
                             logger.debug(f"第 {i + 1} 帧备用提供商调用完成")
                         except Exception as backup_error:
                             logger.error(
@@ -356,6 +361,13 @@ class GIFCensor:
                             }
                         )
                         continue
+
+                # 上报本帧 LLM 用量
+                if usage_sink is not None:
+                    try:
+                        usage_sink(used_pid, getattr(llm_resp, "usage", None))
+                    except Exception as e:
+                        logger.debug(f"上报动图帧用量失败: {e}")
 
                 # 解析结果
                 # 优先使用 completion_text（结果），如果没有则使用 reasoning_content（思维链）
@@ -399,7 +411,7 @@ class GIFCensor:
         return self._aggregate_results(all_violations, len(frames))
 
     async def _detect_batch(
-        self, frames: list[tuple[str, str]]
+        self, frames: list[tuple[str, str]], usage_sink=None
     ) -> tuple[RiskLevel, str]:
         """
         批量合并检测模式 - 单次调用模型，更省token
@@ -446,6 +458,7 @@ class GIFCensor:
                     ),
                     timeout=60.0,
                 )
+                used_pid = provider_id
                 logger.debug("批量检测主提供商调用完成")
             except Exception as primary_error:
                 # 主提供商失败，尝试备用提供商
@@ -461,16 +474,24 @@ class GIFCensor:
                             ),
                             timeout=60.0,
                         )
+                        used_pid = self._backup_provider_id
                         logger.debug("批量检测备用提供商调用完成")
                     except Exception as backup_error:
                         logger.error(f"批量检测备用提供商也调用失败: {backup_error}")
                         # 降级为逐帧检测
                         logger.warning("批量检测失败，降级为逐帧检测")
-                        return await self._detect_separate(frames)
+                        return await self._detect_separate(frames, usage_sink)
                 else:
                     # 没有配置备用提供商，降级为逐帧检测
                     logger.warning(f"批量检测失败，降级为逐帧检测: {primary_error}")
-                    return await self._detect_separate(frames)
+                    return await self._detect_separate(frames, usage_sink)
+
+            # 上报批量检测 LLM 用量
+            if usage_sink is not None:
+                try:
+                    usage_sink(used_pid, getattr(llm_resp, "usage", None))
+                except Exception as e:
+                    logger.debug(f"上报动图批量用量失败: {e}")
 
             # 解析结果
             # 优先使用 completion_text（结果），如果没有则使用 reasoning_content（思维链）

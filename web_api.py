@@ -132,6 +132,7 @@ class WebApiHandler:
         self._db = db
         self._config = config_manager
         self._evidence_dir = evidence_dir
+        self._context: Context | None = None
 
     # ------------------------------------------------------------------ #
     # 注册
@@ -144,6 +145,7 @@ class WebApiHandler:
         ``<vid>``/``<aid>`` 动态路由之前，否则会被动态段优先匹配。
         """
         prefix = f"/{plugin_name}"
+        self._context = context
         routes: list[tuple[str, Any, list[str], str]] = [
             # 概览与群列表
             (f"{prefix}/stats/overview", self.api_stats_overview, ["GET"], "审核概览"),
@@ -266,6 +268,22 @@ class WebApiHandler:
                 ["POST"],
                 "删除账号白名单",
             ),
+            # 成本与定价（v1.5.4）
+            (f"{prefix}/providers", self.api_providers_list, ["GET"], "LLM 提供商列表"),
+            (f"{prefix}/pricing", self.api_pricing_list, ["GET"], "模型定价列表"),
+            (
+                f"{prefix}/pricing",
+                self.api_pricing_upsert,
+                ["POST"],
+                "添加/更新模型定价",
+            ),
+            (
+                f"{prefix}/pricing/<model_id>/delete",
+                self.api_pricing_delete,
+                ["POST"],
+                "删除模型定价",
+            ),
+            (f"{prefix}/cost/overview", self.api_cost_overview, ["GET"], "成本概览"),
         ]
         ok_cnt = 0
         for route, handler, methods, desc in routes:
@@ -1015,4 +1033,96 @@ class WebApiHandler:
             return json_response({})
         except Exception:
             logger.exception("[web_api] api_account_whitelist_delete failed")
+            return error_response("internal error", status_code=500)
+
+    # ------------------------------------------------------------------ #
+    # 成本与定价（v1.5.4）
+    # ------------------------------------------------------------------ #
+
+    async def api_providers_list(self) -> Any:
+        """GET /providers 返回 [{id, type}]（LLM 提供商清单，供配置页下拉）"""
+        try:
+            result: list[dict] = []
+            if self._context is not None:
+                cfg = getattr(
+                    getattr(self._context, "provider_manager", None),
+                    "providers_config",
+                    [],
+                )
+                for p in cfg:
+                    pid = p.get("id")
+                    if pid and p.get("enable", True):
+                        result.append({"id": str(pid), "type": str(p.get("type", ""))})
+            return json_response(result)
+        except Exception:
+            logger.exception("[web_api] api_providers_list failed")
+            return error_response("internal error", status_code=500)
+
+    async def api_pricing_list(self) -> Any:
+        """GET /pricing"""
+        try:
+            items = await self._db.list_model_pricing()
+            return json_response({"items": items, "total": len(items)})
+        except Exception:
+            logger.exception("[web_api] api_pricing_list failed")
+            return error_response("internal error", status_code=500)
+
+    async def api_pricing_upsert(self) -> Any:
+        """POST /pricing  body: {model_id, currency?, price_per?, input_price?,
+        cached_price?, output_price?, label?}  (model_id 必填)"""
+        try:
+            payload = await _json_body()
+            model_id = str(payload.get("model_id", "")).strip()
+            if not model_id:
+                return error_response("model_id is required", status_code=400)
+
+            def _pos_float(v, default):
+                return max(0.0, float(v if v is not None else default))
+
+            def _pos_int(v, default):
+                return max(1, int(v if v is not None else default))
+
+            data = {
+                "currency": str(payload.get("currency", "CNY")) or "CNY",
+                "price_per": _pos_int(payload.get("price_per"), 1000000),
+                "input_price": _pos_float(payload.get("input_price"), 0.0),
+                "cached_price": _pos_float(payload.get("cached_price"), 0.0),
+                "output_price": _pos_float(payload.get("output_price"), 0.0),
+                "label": str(payload.get("label", "")),
+            }
+            ok = await self._db.upsert_model_pricing(model_id, data)
+            if not ok:
+                return error_response("upsert failed", status_code=500)
+            logger.info(
+                f"[web_api] upsert_model_pricing by {_current_user()}: model_id={model_id}"
+            )
+            return json_response({})
+        except Exception:
+            logger.exception("[web_api] api_pricing_upsert failed")
+            return error_response("internal error", status_code=500)
+
+    async def api_pricing_delete(self, model_id: str) -> Any:
+        """POST /pricing/<model_id>/delete"""
+        try:
+            model_id = str(model_id or "").strip()
+            if not model_id:
+                return error_response("invalid model_id", status_code=400)
+            ok = await self._db.delete_model_pricing(model_id)
+            if not ok:
+                return error_response("not found", status_code=404)
+            logger.info(
+                f"[web_api] delete_model_pricing by {_current_user()}: model_id={model_id}"
+            )
+            return json_response({})
+        except Exception:
+            logger.exception("[web_api] api_pricing_delete failed")
+            return error_response("internal error", status_code=500)
+
+    async def api_cost_overview(self) -> Any:
+        """GET /cost/overview"""
+        try:
+            data = await self._db.get_cost_overview()
+            return json_response(data)
+        except Exception:
+            logger.exception("[web_api] api_cost_overview failed")
             return error_response("internal error", status_code=500)

@@ -257,7 +257,10 @@ class AliyunCensor(CensorBase):
             raise CensorError(f"阿里云文本审核请求失败: {e}")
 
     async def detect_image(
-        self, image: str, image_data: bytes | None = None
+        self,
+        image: str,
+        image_data: bytes | None = None,
+        usage_sink=None,
     ) -> tuple[RiskLevel, set[str]]:
         """
         对图片进行内容审核
@@ -265,6 +268,7 @@ class AliyunCensor(CensorBase):
         Args:
             image: 图片URL或base64字符串
             image_data: 已下载的图片数据（可选）
+            usage_sink: 兼容基类签名；Aliyun 不经 LLM，忽略此参数
 
         Returns:
             (风险等级, 风险描述集合)

@@ -201,7 +201,10 @@ class VLAICensor(CensorBase):
         return RiskLevel.Pass, set()
 
     async def detect_image(
-        self, image: str, image_data: bytes | None = None
+        self,
+        image: str,
+        image_data: bytes | None = None,
+        usage_sink: "Any | None" = None,
     ) -> tuple[RiskLevel, set[str]]:
         """
         检测图片内容
@@ -209,6 +212,7 @@ class VLAICensor(CensorBase):
         Args:
             image: 图片URL或base64字符串
             image_data: 已下载的图片数据（可选，如果提供则跳过下载）
+            usage_sink: 可选用量收集回调（见 CensorBase.detect_image）
 
         Returns:
             (风险等级, 风险描述集合)
@@ -275,6 +279,7 @@ class VLAICensor(CensorBase):
                     ),
                     timeout=30.0,
                 )
+                used_pid = provider_id
                 logger.debug("主提供商 LLM 调用完成")
             except Exception as primary_error:
                 # 主提供商失败，尝试备用提供商
@@ -290,6 +295,7 @@ class VLAICensor(CensorBase):
                             ),
                             timeout=30.0,
                         )
+                        used_pid = self._backup_provider_id
                         logger.debug("备用提供商 LLM 调用完成")
                     except Exception as backup_error:
                         logger.error(f"备用提供商也调用失败: {backup_error}")
@@ -299,6 +305,13 @@ class VLAICensor(CensorBase):
                 else:
                     # 没有配置备用提供商，直接抛出原错误
                     raise
+
+            # 上报本次 LLM 用量（供成本统计；usage 可能为 None）
+            if usage_sink is not None:
+                try:
+                    usage_sink(used_pid, getattr(llm_resp, "usage", None))
+                except Exception as e:
+                    logger.debug(f"上报 LLM 用量失败: {e}")
 
             # 解析返回结果
             # 优先使用 completion_text（结果），如果没有则使用 reasoning_content（思维链）
