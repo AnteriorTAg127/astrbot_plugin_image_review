@@ -3,7 +3,7 @@
 图片审核插件 / An image review plugin for AstrBot
 
 [!\[License\](https://img.shields.io/github/license/AnteriorTAg127/astrbot\_plugin\_image\_review null)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v1.5.1-blue null)](metadata.yaml)
+[![Version](https://img.shields.io/badge/version-v1.5.2-blue null)](metadata.yaml)
 
 > \[!IMPORTANT]
 > **本代码由 AI 生成，不保证代码质量，如有问题请多提 issues。**

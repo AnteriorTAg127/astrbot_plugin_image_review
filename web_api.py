@@ -421,7 +421,11 @@ class WebApiHandler:
         记录无路径时按文件名模式兜底查找并写回（懒回填）。
 
         响应：无证据 ``{has_evidence: false}``；有证据
-        ``{has_evidence: true, mime: "image/jpeg", data: <base64>}``。
+        ``{has_evidence: true, mime: "image/jpeg", base64: <base64>}``。
+
+        注意：字段名用 ``base64`` 而非 ``data``——AstrBot Dashboard 父窗口
+        会把响应体的顶层 ``data`` 字段当作包装层解包（``response.data.data``），
+        若用 ``data`` 存 base64 串，bridge 会把裸串而非对象交给前端，导致渲染失败。
         """
         try:
             vid_int, err = _id_or_400(vid)
@@ -472,9 +476,9 @@ class WebApiHandler:
                 im.thumbnail((1024, 1024))
                 buffer = BytesIO()
                 im.save(buffer, format="JPEG", quality=85)
-                data_b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
+                img_b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
                 return json_response(
-                    {"has_evidence": True, "mime": "image/jpeg", "data": data_b64}
+                    {"has_evidence": True, "mime": "image/jpeg", "base64": img_b64}
                 )
             except Exception:
                 logger.exception(

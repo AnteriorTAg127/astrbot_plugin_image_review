@@ -786,7 +786,7 @@ tbody tr:hover { background: var(--surface-2); }
       showFail("加载证据图片失败: " + (e.message || e));
       return;
     }
-    if (!resp || !resp.has_evidence || !resp.data) {
+    if (!resp || !resp.has_evidence || !resp.base64) {
       showFail("无本地证据图片");
       return;
     }
@@ -795,7 +795,7 @@ tbody tr:hover { background: var(--surface-2); }
     holder.className = "";
     var img = el("img", { class: "evidence-img" });
     img.addEventListener("error", function(){ showFail("图片数据无法渲染"); });
-    img.setAttribute("src", "data:" + mime + ";base64," + resp.data);
+    img.setAttribute("src", "data:" + mime + ";base64," + resp.base64);
     holder.appendChild(img);
   }
 

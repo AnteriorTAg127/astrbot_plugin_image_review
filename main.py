@@ -23,7 +23,7 @@ from .utils import ImageUtils, MessageUtils
     "image_review",
     "AnteriorTAg127",
     "图片审核插件，提供图片内容审核、违规处理、管理群通知等功能",
-    "1.5.1",
+    "1.5.2",
 )
 class ImageReviewPlugin(Star):
     """图片审核插件主类"""

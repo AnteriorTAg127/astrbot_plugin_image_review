@@ -1,5 +1,9 @@
 # 更新日志
 
+## v1.5.2
+
+- **修复 WebUI 违规图片不显示**（关键修复）- 证据图片 base64 此前用了顶层字段名 `data`，与 AstrBot Dashboard 父窗口的解包规则冲突：父窗口 `PluginPagePage.vue` 会把响应体的 `response.data.data` 当作包装层优先解包，导致 bridge 把裸 base64 串（而非对象）交给前端，前端读不到 `has_evidence`，误显示"无本地证据图片"。改用字段名 `base64` 规避保留键，前端同步读取。
+
 ## v1.5.1
 
 - **新增账号白名单**（QQ 账号维度，对齐 content_audit 机制）
