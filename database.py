@@ -395,16 +395,29 @@ class DatabaseManager:
             await self._rebuild_manual_list_with_group(cursor, "manual_whitelist")
             await self._rebuild_manual_list_with_group(cursor, "manual_blacklist")
 
-            # 3. audit_log 迁移（v1.5.4：增加 cost 列，存储该次审核所有 LLM 调用总成本）
-            try:
-                await cursor.execute(
-                    "ALTER TABLE audit_log ADD COLUMN cost REAL DEFAULT 0"
-                )
-                logger.debug("audit_log 迁移: 新增列 cost")
-            except aiosqlite.OperationalError:
-                pass  # 列已存在
-
             await conn.commit()
+
+        # v1.5.4 迁移：audit_log 增加 cost 列（独立连接，不依赖外层事务）
+        await self._migrate_audit_log_cost()
+
+    async def _migrate_audit_log_cost(self):
+        """v1.5.4 迁移：为 audit_log 增加 cost 列（独立连接，用 PRAGMA 检测后 ALTER）"""
+        import logging
+
+        logger = logging.getLogger(__name__)
+        try:
+            async with aiosqlite.connect(self._db_path) as conn:
+                cursor = await conn.cursor()
+                await cursor.execute("PRAGMA table_info(audit_log)")
+                cols = {row[1] for row in await cursor.fetchall()}
+                if "cost" not in cols:
+                    await cursor.execute(
+                        "ALTER TABLE audit_log ADD COLUMN cost REAL DEFAULT 0"
+                    )
+                    await conn.commit()
+                    logger.info("audit_log 迁移: 成功新增 cost 列")
+        except Exception as e:
+            logger.error(f"audit_log cost 列迁移失败: {e}")
 
     async def _rebuild_manual_list_with_group(self, cursor, table: str):
         """为人工名单表增加 group_id 并重建唯一约束（幂等）。
