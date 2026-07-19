@@ -128,11 +128,12 @@ class WebApiHandler:
         db: DatabaseManager,
         config_manager: ConfigManager,
         evidence_dir: str,
+        context: Context | None = None,
     ) -> None:
         self._db = db
         self._config = config_manager
         self._evidence_dir = evidence_dir
-        self._context: Context | None = None
+        self._context: Context | None = context
 
     # ------------------------------------------------------------------ #
     # 注册
