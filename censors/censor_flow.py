@@ -240,15 +240,17 @@ class CensorFlow:
                 md5_hash = DatabaseManager.calculate_md5(downloaded_image_data)
                 logger.debug(f"计算MD5完成: {md5_hash}")
 
-            # 1. 检查人工白名单（最高优先级）
+            # 1. 检查人工白名单（最高优先级，全局条目或本群条目命中即放行）
             logger.debug("检查人工白名单")
-            if await self._db.check_manual_whitelist(md5_hash):
+            if await self._db.check_manual_whitelist(md5_hash, group_id):
                 logger.debug(f"图片在人工白名单中，MD5: {md5_hash}")
                 return RiskLevel.Pass, "人工白名单图片", md5_hash, downloaded_image_data
 
-            # 2. 检查人工黑名单（最高优先级）
+            # 2. 检查人工黑名单（最高优先级，群级条目优先于全局条目）
             logger.debug("检查人工黑名单")
-            manual_blacklist_result = await self._db.check_manual_blacklist(md5_hash)
+            manual_blacklist_result = await self._db.check_manual_blacklist(
+                md5_hash, group_id
+            )
             if manual_blacklist_result:
                 risk_level, risk_reason = manual_blacklist_result
                 logger.debug(
@@ -275,7 +277,9 @@ class CensorFlow:
             disable_auto_blacklist = self._config.get("disable_auto_blacklist", False)
             if not disable_auto_blacklist:
                 logger.debug("检查自动黑名单")
-                blacklist_result = await self._db.check_blacklist(md5_hash, expire_hours, expire_days)
+                blacklist_result = await self._db.check_blacklist(
+                    md5_hash, expire_hours, expire_days
+                )
                 if blacklist_result:
                     risk_level, risk_reason = blacklist_result
                     logger.debug(
@@ -464,8 +468,12 @@ class CensorFlow:
                             ImageUtils.calculate_image_hashes, downloaded_image_data
                         )
                     # 根据审核结果决定保存的风险等级
-                    save_risk_level = None if risk_level == RiskLevel.Pass else risk_level
-                    save_risk_reason = None if risk_level == RiskLevel.Pass else risk_reason
+                    save_risk_level = (
+                        None if risk_level == RiskLevel.Pass else risk_level
+                    )
+                    save_risk_reason = (
+                        None if risk_level == RiskLevel.Pass else risk_reason
+                    )
                     await self._db.add_image_hash(
                         md5_hash,
                         phash,

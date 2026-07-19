@@ -23,7 +23,7 @@ from .utils import ImageUtils, MessageUtils
     "image_review",
     "AnteriorTAg127",
     "图片审核插件，提供图片内容审核、违规处理、管理群通知等功能",
-    "1.4.1",
+    "1.5.0",
 )
 class ImageReviewPlugin(Star):
     """图片审核插件主类"""
@@ -63,6 +63,9 @@ class ImageReviewPlugin(Star):
         # 审核流程管理器（延迟初始化）
         self._censor_flow: CensorFlow | None = None
 
+        # Dashboard Web API 处理器（v1.5.0，延迟初始化）
+        self._web_api = None
+
         # 定时任务引用
         self._cleanup_task: asyncio.Task | None = None
 
@@ -80,18 +83,39 @@ class ImageReviewPlugin(Star):
             else:
                 logger.warning("图片审核插件初始化完成，但未启用图片审核（请检查配置）")
 
+            # v1.5.0: 尽力回填旧违规记录的证据图片路径（幂等，供 WebUI 展示）
+            try:
+                await self._db.backfill_evidence_paths(self._evidence_dir)
+            except Exception as e:
+                logger.error(f"证据图片路径回填异常: {e}")
+
+            # v1.5.0: 注册 Dashboard Web API（WebUI 管理面板后端）
+            try:
+                from .web_api import WebApiHandler
+
+                self._web_api = WebApiHandler(
+                    self._db, self._config_manager, self._evidence_dir
+                )
+                self._web_api.register(self.context)
+            except Exception:
+                logger.exception("注册 Dashboard Web API 失败，WebUI 将不可用")
+
             # 启动定时清理任务（每天执行一次）
             self._cleanup_task = asyncio.create_task(self._cleanup_expired_entries())
         except Exception as e:
             logger.error(f"图片审核插件初始化失败: {e}")
 
     async def _cleanup_expired_entries(self):
-        """定时清理过期的黑白名单条目"""
+        """定时清理过期的黑白名单条目与过期审核日志"""
         while True:
             try:
                 # 每天执行一次清理
                 await asyncio.sleep(24 * 60 * 60)  # 24小时
                 await self._db.clean_expired_list_entries()
+                # v1.5.0: 审核日志保留 30 天
+                deleted = await self._db.cleanup_audit_log(keep_days=30)
+                if deleted:
+                    logger.info(f"审核日志清理完成，删除 {deleted} 条过期记录")
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -236,6 +260,20 @@ class ImageReviewPlugin(Star):
                         base_expire_hours=base_expire_hours,
                         max_expire_days=max_expire_days,
                     )
+
+                    # 记录审核日志（无论结果如何，供 WebUI 统计与浏览，v1.5.0）
+                    try:
+                        await self._db.record_audit(
+                            group_id,
+                            user_id,
+                            user_name,
+                            md5_hash,
+                            risk_level,
+                            risk_reason,
+                            source=self._config.get("image_censor_provider", "Aliyun"),
+                        )
+                    except Exception as e:
+                        logger.error(f"记录审核日志异常: {e}")
 
                     # 处理违规
                     if risk_level in (RiskLevel.Review, RiskLevel.Block):
@@ -427,13 +465,84 @@ class ImageReviewPlugin(Star):
         user_id = str(event.get_sender_id())
         return await self._admin_manager.is_user_admin(event, group_id, user_id)
 
+    def _resolve_target_groups(
+        self, manage_group_id: str, group_arg: str | None
+    ) -> tuple[list[str] | None, str]:
+        """解析管理群指令的操作目标群列表（v1.5.0 双群管理机制）
+
+        规则（与 astrbot_plugin_content_audit 一致）:
+        - 仅绑定 1 个被管理群: 命令直接作用于该群（无需群号）
+        - 绑定多个: 必须指定 <群号|all>，未指定则拒绝并列出绑定群
+        - 指定群号时校验其必须绑定到当前管理群
+
+        Args:
+            manage_group_id: 当前管理群 ID
+            group_arg: 用户指定的群号参数，None 表示未提供
+
+        Returns:
+            (目标群列表, 错误信息)；错误信息非空时表示拒绝操作
+        """
+        managed = self._config_manager.get_group_ids_by_manage_group(manage_group_id)
+        if not managed:
+            return None, "当前管理群没有关联的被管理群"
+        if len(managed) == 1:
+            return managed, ""
+        if not group_arg:
+            return None, (
+                "本管理群绑定了多个群，请指定群号或 all。绑定群：" + "、".join(managed)
+            )
+        if group_arg == "all":
+            return managed, ""
+        if group_arg not in managed:
+            return None, f"群 {group_arg} 未绑定到本管理群"
+        return [group_arg], ""
+
+    def _parse_scope_arg(
+        self, manage_group_id: str, reason: str, group_arg: str
+    ) -> tuple[str, str]:
+        """解析名单指令末尾的 [群号|all] 范围参数（v1.5.0，向后兼容）
+
+        末位参数为 all 或本管理群已绑定群号时识别为范围；
+        否则视为原因文本的一部分，范围取全局（旧用法不受影响）。
+
+        Args:
+            manage_group_id: 当前管理群 ID
+            reason: 已解析的原因参数
+            group_arg: 末位参数（可能为空）
+
+        Returns:
+            (最终原因, 群范围)；群范围 '' 表示全局
+        """
+        ga = (group_arg or "").strip()
+        reason = (reason or "").strip()
+        if not ga:
+            return reason, ""
+        if ga == "all":
+            return reason, ""
+        managed = self._config_manager.get_group_ids_by_manage_group(manage_group_id)
+        if ga in managed:
+            return reason, ga
+        # 非有效范围参数 → 并入原因（兼容旧版 /添加白名单 <多词原因> 用法）
+        return f"{reason} {ga}".strip(), ""
+
+    def _format_list_scopes(self, entries: list[dict]) -> str:
+        """将名单条目列表格式化为范围描述，如「全局、群123、群456」"""
+        scopes = []
+        for entry in entries:
+            gid = entry.get("group_id", "")
+            scopes.append("全局" if not gid else f"群{gid}")
+        return "、".join(scopes)
+
     @filter.command("查询违规")
-    async def query_violation(self, event: AstrMessageEvent, user_id_str: str = ""):
-        """查询用户违规记录（管理群专用）"""
+    async def query_violation(
+        self, event: AstrMessageEvent, user_id_str: str = "", group_arg: str = ""
+    ):
+        """查询用户违规记录（管理群专用；多绑定群需指定 群号|all）"""
         try:
             group_id = str(event.get_group_id()) if event.get_group_id() else None
             if not group_id:
                 return
+            self._config_manager.maybe_reload()
             if not self._config_manager.is_manage_group(group_id):
                 return
             if not await self._check_admin_permission(event, group_id):
@@ -442,19 +551,33 @@ class ImageReviewPlugin(Star):
                 )
                 return
             if not user_id_str:
-                yield event.plain_result("使用方法: /查询违规 [QQ号]")
+                yield event.plain_result("使用方法: /查询违规 [QQ号] [群号|all]")
                 return
             user_id = user_id_str.strip()
-            records = await self._db.get_user_violation_records(user_id, limit=10)
-            if not records:
-                yield event.plain_result(f"用户 {user_id} 暂无违规记录")
+            targets, err = self._resolve_target_groups(
+                group_id, group_arg.strip() or None
+            )
+            if err:
+                yield event.plain_result(f"⚠️ {err}")
                 return
-            violation_count = len(records)
+            # 查询目标群范围内的违规记录并合并
+            all_records: list[dict] = []
+            for target in targets:
+                records = await self._db.get_user_violation_records(
+                    user_id, group_id=target, limit=10
+                )
+                all_records.extend(records)
+            if not all_records:
+                yield event.plain_result(f"用户 {user_id} 在目标群范围内暂无违规记录")
+                return
+            all_records.sort(
+                key=lambda r: str(r.get("violation_time", "")), reverse=True
+            )
             result = f"📊 用户 {user_id} 的违规记录\n"
             result += "━━━━━━━━━━━━━━━\n"
-            result += f"总违规次数: {violation_count}\n"
+            result += f"总违规次数: {len(all_records)}\n"
             result += "━━━━━━━━━━━━━━━\n"
-            for i, record in enumerate(records[:5], 1):
+            for i, record in enumerate(all_records[:5], 1):
                 violation_time = record.get("violation_time", "")
                 risk_level = RiskLevel(record.get("risk_level", 0)).name
                 risk_reason = record.get("risk_reason", "")
@@ -478,12 +601,13 @@ class ImageReviewPlugin(Star):
             logger.error(f"查询违规记录异常: {e}")
 
     @filter.command("审核状态")
-    async def check_status(self, event: AstrMessageEvent):
-        """查看审核插件状态（管理群专用）"""
+    async def check_status(self, event: AstrMessageEvent, group_arg: str = ""):
+        """查看审核插件状态（管理群专用；多绑定群需指定 群号|all）"""
         try:
             group_id = str(event.get_group_id()) if event.get_group_id() else None
             if not group_id:
                 return
+            self._config_manager.maybe_reload()
             if not self._config_manager.is_manage_group(group_id):
                 return
             if not await self._check_admin_permission(event, group_id):
@@ -520,6 +644,26 @@ class ImageReviewPlugin(Star):
             status_info += "━━━━━━━━━━━━━━━\n"
             status_info += f"自动白名单: {cache_counts['whitelist']} 条\n"
             status_info += f"自动黑名单: {cache_counts['blacklist']} 条\n"
+
+            # v1.5.0: 按目标群输出违规统计（双群管理机制）
+            targets, err = self._resolve_target_groups(
+                group_id, group_arg.strip() or None
+            )
+            if err:
+                status_info += f"\n⚠️ {err}\n"
+            else:
+                status_info += "\n📈 被管理群统计\n"
+                status_info += "━━━━━━━━━━━━━━━\n"
+                for target in targets:
+                    stats = await self._db.get_group_violation_stats(target)
+                    cfg = self._config_manager.get_group_config(target)
+                    name = (cfg or {}).get("group_name") or ""
+                    label = f"{name}({target})" if name else target
+                    status_info += (
+                        f"群 {label}: 今日审核 {stats['today_audits']} | "
+                        f"今日违规 {stats['today_violations']} | "
+                        f"累计违规 {stats['total_violations']}\n"
+                    )
             status_info += "━━━━━━━━━━━━━━━"
             yield event.plain_result(status_info)
         except Exception as e:
@@ -532,6 +676,7 @@ class ImageReviewPlugin(Star):
             group_id = str(event.get_group_id()) if event.get_group_id() else None
             if not group_id:
                 return
+            self._config_manager.maybe_reload()
             if not self._config_manager.is_manage_group(group_id):
                 return
             if not await self._check_admin_permission(event, group_id):
@@ -551,13 +696,14 @@ class ImageReviewPlugin(Star):
 
     @filter.command("查询名单")
     async def query_list_status(self, event: AstrMessageEvent):
-        """查询图片在黑白名单中的状态（管理群专用，需引用图片）"""
+        """查询图片在黑白名单中的状态（管理群专用，需引用图片；人工名单按范围展示）"""
         try:
             manage_group_id = (
                 str(event.get_group_id()) if event.get_group_id() else None
             )
             if not manage_group_id:
                 return
+            self._config_manager.maybe_reload()
             if not self._config_manager.is_manage_group(manage_group_id):
                 return
             if not await self._check_admin_permission(event, manage_group_id):
@@ -581,20 +727,33 @@ class ImageReviewPlugin(Star):
             result += "━━━━━━━━━━━━━━━\n"
             for i, md5_hash in enumerate(image_md5s, 1):
                 result += f"\n图片 {i} (MD5: {md5_hash[:16]}...)\n"
-                in_manual_whitelist = await self._db.check_manual_whitelist(md5_hash)
-                result += (
-                    f"  人工白名单: {'✅ 是' if in_manual_whitelist else '❌ 否'}\n"
-                )
-                manual_blacklist_result = await self._db.check_manual_blacklist(
-                    md5_hash
-                )
-                if manual_blacklist_result:
-                    result += f"  人工黑名单: ✅ 是 (等级: {manual_blacklist_result[0].name})\n"
+                # 人工白名单（按范围展示，v1.5.0）
+                wl_entries = await self._db.get_manual_whitelist_entries(md5_hash)
+                if wl_entries:
+                    result += (
+                        f"  人工白名单: ✅ {self._format_list_scopes(wl_entries)}\n"
+                    )
+                else:
+                    result += "  人工白名单: ❌ 否\n"
+                # 人工黑名单（按范围展示，v1.5.0）
+                bl_entries = await self._db.get_manual_blacklist_entries(md5_hash)
+                if bl_entries:
+                    levels = "、".join(
+                        RiskLevel(e.get("risk_level", 2)).name for e in bl_entries
+                    )
+                    result += (
+                        f"  人工黑名单: ✅ {self._format_list_scopes(bl_entries)} "
+                        f"(等级: {levels})\n"
+                    )
                 else:
                     result += "  人工黑名单: ❌ 否\n"
-                in_auto_whitelist = await self._db.check_whitelist(md5_hash, extend_on_hit=False)
+                in_auto_whitelist = await self._db.check_whitelist(
+                    md5_hash, extend_on_hit=False
+                )
                 result += f"  自动白名单: {'✅ 是' if in_auto_whitelist else '❌ 否'}\n"
-                auto_blacklist_result = await self._db.check_blacklist(md5_hash, extend_on_hit=False)
+                auto_blacklist_result = await self._db.check_blacklist(
+                    md5_hash, extend_on_hit=False
+                )
                 if auto_blacklist_result:
                     result += (
                         f"  自动黑名单: ✅ 是 (等级: {auto_blacklist_result[0].name})\n"
@@ -608,14 +767,21 @@ class ImageReviewPlugin(Star):
             yield event.plain_result(f"❌ 操作失败: {str(e)}")
 
     @filter.command("删除违规")
-    async def delete_violation(self, event: AstrMessageEvent, user_id_str: str = ""):
-        """删除指定用户的违规记录（管理群专用）"""
+    async def delete_violation(
+        self,
+        event: AstrMessageEvent,
+        user_id_str: str = "",
+        arg2: str = "",
+        arg3: str = "",
+    ):
+        """删除指定用户的违规记录（管理群专用；多绑定群需指定 群号|all；需确认）"""
         try:
             manage_group_id = (
                 str(event.get_group_id()) if event.get_group_id() else None
             )
             if not manage_group_id:
                 return
+            self._config_manager.maybe_reload()
             if not self._config_manager.is_manage_group(manage_group_id):
                 return
             if not await self._check_admin_permission(event, manage_group_id):
@@ -624,18 +790,27 @@ class ImageReviewPlugin(Star):
                 )
                 return
             if not user_id_str:
-                yield event.plain_result("使用方法: /删除违规 [QQ号]")
+                yield event.plain_result("使用方法: /删除违规 [QQ号] [群号|all] 确认")
                 return
             user_id = user_id_str.strip()
-            target_group_ids = self._config_manager.get_group_ids_by_manage_group(
-                manage_group_id
-            )
-            if not target_group_ids:
-                yield event.plain_result("❌ 未找到对应的被管理群")
+            # 解析 确认 与 群号|all 参数（顺序不敏感）
+            extras = [a.strip() for a in (arg2, arg3) if a.strip()]
+            has_confirm = any(a == "确认" for a in extras)
+            group_tokens = [a for a in extras if a != "确认"]
+            group_arg = group_tokens[0] if group_tokens else None
+            if not has_confirm:
+                yield event.plain_result(
+                    f"⚠️ 确认清除用户 {user_id} 的违规记录？请追加「确认」参数:\n"
+                    f"/删除违规 {user_id} [群号|all] 确认"
+                )
+                return
+            targets, err = self._resolve_target_groups(manage_group_id, group_arg)
+            if err:
+                yield event.plain_result(f"⚠️ {err}")
                 return
             total_deleted = 0
             deleted_details = []
-            for target_group_id in target_group_ids:
+            for target_group_id in targets:
                 deleted_count = await self._db.delete_user_violations(
                     user_id, target_group_id
                 )
@@ -653,14 +828,17 @@ class ImageReviewPlugin(Star):
             logger.error(f"删除违规记录异常: {e}")
 
     @filter.command("添加白名单")
-    async def add_manual_whitelist_cmd(self, event: AstrMessageEvent, reason: str = ""):
-        """添加图片到人工白名单（管理群专用，需引用图片）"""
+    async def add_manual_whitelist_cmd(
+        self, event: AstrMessageEvent, reason: str = "", group_arg: str = ""
+    ):
+        """添加图片到人工白名单（管理群专用，需引用图片；末位 [群号|all] 指定范围，缺省全局）"""
         try:
             manage_group_id = (
                 str(event.get_group_id()) if event.get_group_id() else None
             )
             if not manage_group_id:
                 return
+            self._config_manager.maybe_reload()
             if not self._config_manager.is_manage_group(manage_group_id):
                 return
             if not await self._check_admin_permission(event, manage_group_id):
@@ -681,34 +859,40 @@ class ImageReviewPlugin(Star):
                 yield event.plain_result("❌ 引用的消息中没有图片")
                 return
             user_id = str(event.get_sender_id())
+            reason, scope = self._parse_scope_arg(manage_group_id, reason, group_arg)
             added_count = 0
             for md5_hash in image_md5s:
                 success = await self._db.add_manual_whitelist(
                     md5_hash=md5_hash,
                     added_by=user_id,
                     reason=reason if reason else None,
+                    group_id=scope,
                 )
                 if success:
                     added_count += 1
+            scope_str = "全局" if not scope else f"群 {scope} 的"
             if added_count > 0:
                 yield event.plain_result(
-                    f"✅ 成功添加 {added_count} 张图片到人工白名单"
+                    f"✅ 成功添加 {added_count} 张图片到{scope_str}人工白名单"
                 )
             else:
-                yield event.plain_result("⚠️ 图片已在人工白名单中")
+                yield event.plain_result("⚠️ 图片已在该范围的人工白名单中")
         except Exception as e:
             logger.error(f"添加人工白名单异常: {e}")
             yield event.plain_result(f"❌ 操作失败: {str(e)}")
 
     @filter.command("移除白名单")
-    async def remove_manual_whitelist_cmd(self, event: AstrMessageEvent):
-        """从人工白名单移除图片（管理群专用，需引用图片）"""
+    async def remove_manual_whitelist_cmd(
+        self, event: AstrMessageEvent, group_arg: str = ""
+    ):
+        """从人工白名单移除图片（管理群专用，需引用图片；[群号|all] 指定范围，缺省全部范围）"""
         try:
             manage_group_id = (
                 str(event.get_group_id()) if event.get_group_id() else None
             )
             if not manage_group_id:
                 return
+            self._config_manager.maybe_reload()
             if not self._config_manager.is_manage_group(manage_group_id):
                 return
             if not await self._check_admin_permission(event, manage_group_id):
@@ -728,17 +912,30 @@ class ImageReviewPlugin(Star):
             if not image_md5s:
                 yield event.plain_result("❌ 引用的消息中没有图片")
                 return
+            # 解析范围：all/缺省=全部范围；具体群号需绑定到本管理群
+            ga = group_arg.strip()
+            if ga in ("", "all"):
+                scope: str | None = None
+            else:
+                managed = self._config_manager.get_group_ids_by_manage_group(
+                    manage_group_id
+                )
+                if ga not in managed:
+                    yield event.plain_result(f"⚠️ 群 {ga} 未绑定到本管理群")
+                    return
+                scope = ga
             removed_count = 0
             for md5_hash in image_md5s:
-                success = await self._db.remove_manual_whitelist(md5_hash)
+                success = await self._db.remove_manual_whitelist(md5_hash, scope)
                 if success:
                     removed_count += 1
+            scope_str = "全部范围" if scope is None else f"群 {scope} 范围"
             if removed_count > 0:
                 yield event.plain_result(
-                    f"✅ 成功从人工白名单移除 {removed_count} 张图片"
+                    f"✅ 成功从{scope_str}人工白名单移除 {removed_count} 张图片"
                 )
             else:
-                yield event.plain_result("⚠️ 图片不在人工白名单中")
+                yield event.plain_result("⚠️ 图片不在该范围的人工白名单中")
         except Exception as e:
             logger.error(f"移除人工白名单异常: {e}")
             yield event.plain_result(f"❌ 操作失败: {str(e)}")
@@ -754,6 +951,7 @@ class ImageReviewPlugin(Star):
             )
             if not manage_group_id:
                 return
+            self._config_manager.maybe_reload()
             if not self._config_manager.is_manage_group(manage_group_id):
                 return
             if not await self._check_admin_permission(event, manage_group_id):
@@ -774,15 +972,20 @@ class ImageReviewPlugin(Star):
 
     @filter.command("添加黑名单")
     async def add_manual_blacklist_cmd(
-        self, event: AstrMessageEvent, risk_level_str: str = "", reason: str = ""
+        self,
+        event: AstrMessageEvent,
+        risk_level_str: str = "",
+        reason: str = "",
+        group_arg: str = "",
     ):
-        """添加图片到人工黑名单（管理群专用，需引用图片）"""
+        """添加图片到人工黑名单（管理群专用，需引用图片；末位 [群号|all] 指定范围，缺省全局）"""
         try:
             manage_group_id = (
                 str(event.get_group_id()) if event.get_group_id() else None
             )
             if not manage_group_id:
                 return
+            self._config_manager.maybe_reload()
             if not self._config_manager.is_manage_group(manage_group_id):
                 return
             if not await self._check_admin_permission(event, manage_group_id):
@@ -815,6 +1018,7 @@ class ImageReviewPlugin(Star):
                     )
                     return
             user_id = str(event.get_sender_id())
+            reason, scope = self._parse_scope_arg(manage_group_id, reason, group_arg)
             added_count = 0
             for md5_hash in image_md5s:
                 success = await self._db.add_manual_blacklist(
@@ -823,28 +1027,33 @@ class ImageReviewPlugin(Star):
                     risk_reason=reason if reason else "人工添加",
                     added_by=user_id,
                     reason=reason if reason else None,
+                    group_id=scope,
                 )
                 if success:
                     added_count += 1
+            scope_str = "全局" if not scope else f"群 {scope} 的"
             if added_count > 0:
                 yield event.plain_result(
-                    f"✅ 成功添加 {added_count} 张图片到人工黑名单"
+                    f"✅ 成功添加 {added_count} 张图片到{scope_str}人工黑名单"
                 )
             else:
-                yield event.plain_result("⚠️ 图片已在人工黑名单中")
+                yield event.plain_result("⚠️ 图片已在该范围的人工黑名单中")
         except Exception as e:
             logger.error(f"添加人工黑名单异常: {e}")
             yield event.plain_result(f"❌ 操作失败: {str(e)}")
 
     @filter.command("移除黑名单")
-    async def remove_manual_blacklist_cmd(self, event: AstrMessageEvent):
-        """从人工黑名单移除图片（管理群专用，需引用图片）"""
+    async def remove_manual_blacklist_cmd(
+        self, event: AstrMessageEvent, group_arg: str = ""
+    ):
+        """从人工黑名单移除图片（管理群专用，需引用图片；[群号|all] 指定范围，缺省全部范围）"""
         try:
             manage_group_id = (
                 str(event.get_group_id()) if event.get_group_id() else None
             )
             if not manage_group_id:
                 return
+            self._config_manager.maybe_reload()
             if not self._config_manager.is_manage_group(manage_group_id):
                 return
             if not await self._check_admin_permission(event, manage_group_id):
@@ -864,17 +1073,30 @@ class ImageReviewPlugin(Star):
             if not image_md5s:
                 yield event.plain_result("❌ 引用的消息中没有图片")
                 return
+            # 解析范围：all/缺省=全部范围；具体群号需绑定到本管理群
+            ga = group_arg.strip()
+            if ga in ("", "all"):
+                scope: str | None = None
+            else:
+                managed = self._config_manager.get_group_ids_by_manage_group(
+                    manage_group_id
+                )
+                if ga not in managed:
+                    yield event.plain_result(f"⚠️ 群 {ga} 未绑定到本管理群")
+                    return
+                scope = ga
             removed_count = 0
             for md5_hash in image_md5s:
-                success = await self._db.remove_manual_blacklist(md5_hash)
+                success = await self._db.remove_manual_blacklist(md5_hash, scope)
                 if success:
                     removed_count += 1
+            scope_str = "全部范围" if scope is None else f"群 {scope} 范围"
             if removed_count > 0:
                 yield event.plain_result(
-                    f"✅ 成功从人工黑名单移除 {removed_count} 张图片"
+                    f"✅ 成功从{scope_str}人工黑名单移除 {removed_count} 张图片"
                 )
             else:
-                yield event.plain_result("⚠️ 图片不在人工黑名单中")
+                yield event.plain_result("⚠️ 图片不在该范围的人工黑名单中")
         except Exception as e:
             logger.error(f"移除人工黑名单异常: {e}")
             yield event.plain_result(f"❌ 操作失败: {str(e)}")
@@ -890,6 +1112,7 @@ class ImageReviewPlugin(Star):
             )
             if not manage_group_id:
                 return
+            self._config_manager.maybe_reload()
             if not self._config_manager.is_manage_group(manage_group_id):
                 return
             if not await self._check_admin_permission(event, manage_group_id):
@@ -917,6 +1140,7 @@ class ImageReviewPlugin(Star):
             )
             if not manage_group_id:
                 return
+            self._config_manager.maybe_reload()
             if not self._config_manager.is_manage_group(manage_group_id):
                 return
             if not await self._check_admin_permission(event, manage_group_id):
@@ -960,6 +1184,7 @@ class ImageReviewPlugin(Star):
             )
             if not manage_group_id:
                 return
+            self._config_manager.maybe_reload()
             if not self._config_manager.is_manage_group(manage_group_id):
                 return
             if not await self._check_admin_permission(event, manage_group_id):
@@ -1011,33 +1236,44 @@ class ImageReviewPlugin(Star):
                 "\n"
                 "【管理员命令】\n"
                 "━━━━━━━━━━━━━━━\n"
-                "/查询违规 [QQ号] - 查询用户违规记录\n"
-                "/删除违规 [QQ号] - 删除用户违规记录\n"
-                "/审核状态 - 查看插件运行状态\n"
+                "/查询违规 [QQ号] [群号|all] - 查询用户违规记录\n"
+                "/删除违规 [QQ号] [群号|all] 确认 - 删除用户违规记录\n"
+                "/审核状态 [群号|all] - 查看插件运行状态与群统计\n"
                 "/清除缓存 - 清除自动黑白名单缓存\n"
                 "/查询名单 - 查询图片名单状态(需引用图片)\n"
                 "\n"
+                "【双群管理说明】\n"
+                "━━━━━━━━━━━━━━━\n"
+                "• 管理群仅绑定1个被管理群时，命令直接作用该群(无需群号)\n"
+                "• 绑定多个时需带 群号 或 all，群号须绑定到本管理群\n"
+                "• 名单命令末位 [群号|all] 指定范围，缺省为全局\n"
+                "\n"
                 "【人工白名单管理】\n"
                 "━━━━━━━━━━━━━━━\n"
-                "/添加白名单 [原因] - 添加图片到白名单(需引用)\n"
+                "/添加白名单 [原因] [群号|all] - 添加图片到白名单(需引用)\n"
                 "  提示: 原因含空格时用引号包裹，如:\n"
-                '  /添加白名单 "误拦截，正常图片"\n'
-                "/移除白名单 - 从白名单移除图片(需引用)\n"
+                '  /添加白名单 "误拦截，正常图片" 123456\n'
+                "/移除白名单 [群号|all] - 从白名单移除图片(需引用)\n"
                 "/清空白名单 确认 - 清空所有人工白名单\n"
                 "\n"
                 "【人工黑名单管理】\n"
                 "━━━━━━━━━━━━━━━\n"
-                "/添加黑名单 [REVIEW/BLOCK] [原因]\n"
+                "/添加黑名单 [REVIEW/BLOCK] [原因] [群号|all]\n"
                 "  添加图片到黑名单(需引用图片)\n"
                 "  提示: 原因含空格时用引号包裹，如:\n"
-                '  /添加黑名单 BLOCK "色情违规内容"\n'
-                "/移除黑名单 - 从黑名单移除图片(需引用)\n"
+                '  /添加黑名单 BLOCK "色情违规内容" 123456\n'
+                "/移除黑名单 [群号|all] - 从黑名单移除图片(需引用)\n"
                 "/清空黑名单 确认 - 清空所有人工黑名单\n"
                 "\n"
                 "【自动名单管理】\n"
                 "━━━━━━━━━━━━━━━\n"
                 "/移除自动白名单 - 移除自动白名单(需引用)\n"
                 "/移除自动黑名单 - 移除自动黑名单(需引用)\n"
+                "\n"
+                "【WebUI 管理面板】\n"
+                "━━━━━━━━━━━━━━━\n"
+                "• AstrBot Dashboard → 插件详情 → 图片审核管理\n"
+                "• 可查看违规记录/违规图片/LLM分析/违规档案/审核统计\n"
                 "\n"
                 "【动图检测说明】\n"
                 "━━━━━━━━━━━━━━━\n"

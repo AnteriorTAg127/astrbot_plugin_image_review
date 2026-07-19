@@ -1,0 +1,1555 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>图片审核管理</title>
+<style>
+:root {
+  --bg: #f5f7fa;
+  --surface: #ffffff;
+  --surface-2: #f0f2f5;
+  --surface-3: #e9ecef;
+  --text: #1a1a2e;
+  --text-2: #6b7280;
+  --border: #e5e7eb;
+  --primary: #4f46e5;
+  --primary-hover: #4338ca;
+  --danger: #ef4444;
+  --danger-hover: #dc2626;
+  --success: #10b981;
+  --warn: #f59e0b;
+  --info: #3b82f6;
+  --radius: 8px;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+[data-theme="dark"] {
+  --bg: #0f172a;
+  --surface: #1e293b;
+  --surface-2: #334155;
+  --surface-3: #475569;
+  --text: #f1f5f9;
+  --text-2: #94a3b8;
+  --border: #334155;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: var(--font); background: var(--bg); color: var(--text); line-height: 1.5; font-size: 14px; }
+#app { max-width: 1280px; margin: 0 auto; padding: 12px; }
+.app-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--border); margin-bottom: 12px; flex-wrap: wrap; gap: 8px; }
+.app-header h1 { font-size: 18px; font-weight: 700; }
+.app-header .actions { display: flex; gap: 8px; }
+.tabs { display: flex; gap: 2px; margin-bottom: 0; flex-wrap: wrap; }
+.tab { padding: 8px 18px; border: 1px solid var(--border); border-bottom: none; background: var(--surface-2); color: var(--text-2); cursor: pointer; border-radius: var(--radius) var(--radius) 0 0; font-size: 14px; user-select: none; }
+.tab.active { background: var(--surface); color: var(--text); font-weight: 600; }
+.tab:hover:not(.active) { background: var(--surface-3); }
+.panel { background: var(--surface); border: 1px solid var(--border); border-radius: 0 var(--radius) var(--radius) var(--radius); padding: 16px; min-height: 300px; }
+.btn { padding: 6px 14px; border: 1px solid var(--border); background: var(--surface); color: var(--text); cursor: pointer; border-radius: var(--radius); font-size: 13px; font-family: inherit; transition: all 0.15s; user-select: none; }
+.btn:hover { background: var(--surface-2); }
+.btn-primary { background: var(--primary); color: #fff; border-color: var(--primary); }
+.btn-primary:hover { background: var(--primary-hover); }
+.btn-danger { background: var(--danger); color: #fff; border-color: var(--danger); }
+.btn-danger:hover { background: var(--danger-hover); }
+.btn-sm { padding: 3px 8px; font-size: 12px; }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.filter-bar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; align-items: center; }
+.filter-bar input, .filter-bar select { padding: 6px 10px; border: 1px solid var(--border); background: var(--surface); color: var(--text); border-radius: var(--radius); font-size: 13px; font-family: inherit; }
+.filter-bar input { width: 140px; }
+.toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; gap: 8px; flex-wrap: wrap; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { background: var(--surface-2); font-weight: 600; color: var(--text-2); position: sticky; top: 0; }
+tbody tr:hover { background: var(--surface-2); }
+.table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius); }
+.empty { text-align: center; padding: 40px; color: var(--text-2); }
+.pagination { display: flex; justify-content: center; align-items: center; gap: 12px; margin-top: 12px; }
+.pagination .info { color: var(--text-2); font-size: 12px; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+.badge-success { background: rgba(16,185,129,0.15); color: var(--success); }
+.badge-danger { background: rgba(239,68,68,0.15); color: var(--danger); }
+.badge-warn { background: rgba(245,158,11,0.15); color: var(--warn); }
+.badge-info { background: rgba(59,130,246,0.15); color: var(--info); }
+.badge-muted { background: var(--surface-3); color: var(--text-2); }
+.chip { display: inline-block; padding: 1px 6px; background: var(--surface-2); border-radius: 4px; font-size: 11px; margin: 1px 2px; }
+.preview { max-width: 320px; word-break: break-all; }
+.stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
+.stat-grid.six { grid-template-columns: repeat(6, 1fr); }
+.stat-grid.three { grid-template-columns: repeat(3, 1fr); }
+.stat-card { background: var(--surface-2); border-radius: var(--radius); padding: 16px; text-align: center; }
+.stat-card .label { color: var(--text-2); font-size: 12px; }
+.stat-card .value { font-size: 28px; font-weight: 700; color: var(--primary); margin-top: 4px; }
+.chart { display: flex; gap: 6px; align-items: flex-end; height: 160px; padding: 12px; background: var(--surface-2); border-radius: var(--radius); margin-bottom: 8px; }
+.chart-day { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 0; }
+.chart-bars { display: flex; gap: 2px; align-items: flex-end; height: 110px; width: 100%; justify-content: center; }
+.chart-bar { width: 14px; background: var(--primary); border-radius: 2px 2px 0 0; min-height: 1px; transition: height 0.3s; position: relative; }
+.chart-bar.violation { background: var(--danger); }
+.chart-label { font-size: 11px; color: var(--text-2); }
+.section-title { font-weight: 700; margin: 16px 0 8px; font-size: 15px; }
+.dual-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.legend { display: flex; gap: 16px; justify-content: center; padding: 8px; font-size: 12px; color: var(--text-2); margin-bottom: 8px; }
+.legend-item { display: flex; align-items: center; gap: 4px; }
+.legend-dot { width: 12px; height: 12px; border-radius: 2px; }
+.modal-mask { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 20px; }
+.modal { background: var(--surface); border-radius: var(--radius); padding: 20px; min-width: 320px; max-width: 600px; width: 100%; max-height: 90vh; overflow-y: auto; box-shadow: 0 10px 30px rgba(0,0,0,0.3); }
+.modal h3 { margin-bottom: 12px; font-size: 16px; }
+.modal .form-row { margin-bottom: 10px; }
+.modal label { display: block; font-size: 12px; color: var(--text-2); margin-bottom: 4px; }
+.modal input, .modal select, .modal textarea { width: 100%; padding: 7px 10px; border: 1px solid var(--border); background: var(--bg); color: var(--text); border-radius: var(--radius); font-size: 13px; font-family: inherit; }
+.modal textarea { resize: vertical; min-height: 70px; }
+.modal .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.modal .readonly-block { background: var(--surface-2); padding: 8px 10px; border-radius: var(--radius); font-family: ui-monospace, monospace; font-size: 12px; max-height: 240px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
+.evidence-img { max-width: 100%; border-radius: var(--radius); display: block; margin: 0 auto; }
+.toast-mount { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); z-index: 2000; display: flex; flex-direction: column; gap: 8px; }
+.toast { padding: 10px 18px; border-radius: var(--radius); color: #fff; font-size: 13px; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
+.toast.success { background: var(--success); }
+.toast.error { background: var(--danger); }
+.toast.info { background: var(--info); }
+.spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--surface-3); border-top-color: var(--primary); border-radius: 50%; vertical-align: middle; animation: spin 0.8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.loading-overlay { padding: 40px; text-align: center; color: var(--text-2); }
+@media (max-width: 1024px) {
+  .stat-grid { grid-template-columns: repeat(2, 1fr); }
+  .stat-grid.six { grid-template-columns: repeat(3, 1fr); }
+  .stat-grid.three { grid-template-columns: repeat(3, 1fr); }
+  .dual-col { grid-template-columns: 1fr; }
+  th, td { padding: 6px 8px; font-size: 12px; }
+}
+@media (max-width: 768px) {
+  #app { padding: 6px; }
+  .app-header h1 { font-size: 16px; }
+  .tab { padding: 6px 10px; font-size: 12px; }
+  .panel { padding: 10px; }
+  .filter-bar input { width: 100%; }
+  .stat-grid.six { grid-template-columns: repeat(2, 1fr); }
+  table thead { display: none; }
+  table, tbody, tr, td { display: block; width: 100%; }
+  tr { border: 1px solid var(--border); border-radius: var(--radius); padding: 8px; margin-bottom: 8px; background: var(--surface); }
+  td { border: none; padding: 4px 0; }
+  td::before { content: attr(data-label) ": "; font-weight: 600; color: var(--text-2); margin-right: 4px; }
+  .preview { max-width: none; }
+  .chart-bar { width: 8px; }
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="app-header">
+    <h1>图片审核管理</h1>
+    <div class="actions">
+      <button class="btn" id="btn-refresh">刷新</button>
+    </div>
+  </div>
+  <nav class="tabs" id="tabs">
+    <div class="tab active" data-tab="overview">概览</div>
+    <div class="tab" data-tab="violations">违规记录</div>
+    <div class="tab" data-tab="audits">审核日志</div>
+    <div class="tab" data-tab="whitelist">白名单</div>
+    <div class="tab" data-tab="blacklist">黑名单</div>
+    <div class="tab" data-tab="users">违规档案</div>
+  </nav>
+  <main class="panel" id="content">
+    <div class="loading-overlay"><span class="spinner"></span> 加载中...</div>
+  </main>
+</div>
+<div id="modal-mount"></div>
+<div id="toast-mount" class="toast-mount"></div>
+<script>
+(function(){
+  "use strict";
+  var bridge = null;
+  var state = {
+    tab: "overview",
+    violations: { page: 1, page_size: 20, group_id: "", user_id: "", keyword: "", risk_level: "", items: [], total: 0, selected: {}, date_from: "", date_to: "", sort_by: "", sort_dir: "" },
+    audits: { page: 1, page_size: 20, group_id: "", risk_level: "", keyword: "", items: [], total: 0, selected: {}, date_from: "", date_to: "", sort_by: "", sort_dir: "" },
+    whitelist: { items: [], total: 0, group_id_filter: "", sort_by: "", sort_dir: "" },
+    blacklist: { items: [], total: 0, group_id_filter: "", sort_by: "", sort_dir: "" },
+    users: { page: 1, page_size: 20, keyword: "", status: "", items: [], total: 0, first_seen_from: "", first_seen_to: "", last_seen_from: "", last_seen_to: "", groups: [], sort_by: "", sort_dir: "" }
+  };
+
+  function $(sel, root) { return (root || document).querySelector(sel); }
+  function $$(sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); }
+  function el(tag, attrs, children) {
+    var n = document.createElement(tag);
+    if (attrs) {
+      for (var k in attrs) {
+        if (k === "class") n.className = attrs[k];
+        else if (k === "text") n.textContent = attrs[k];
+        else if (k === "html") n.innerHTML = attrs[k];
+        else if (k === "style") n.setAttribute("style", attrs[k]);
+        else if (attrs[k] !== null && attrs[k] !== undefined) n.setAttribute(k, attrs[k]);
+      }
+    }
+    if (children) {
+      if (!Array.isArray(children)) children = [children];
+      children.forEach(function(c){
+        if (c == null) return;
+        if (typeof c === "string") n.appendChild(document.createTextNode(c));
+        else n.appendChild(c);
+      });
+    }
+    return n;
+  }
+  function truncate(s, n) {
+    if (s == null) return "";
+    s = String(s);
+    if (s.length <= n) return s;
+    return s.slice(0, n) + "...";
+  }
+  function fmtTime(t) {
+    if (!t) return "";
+    return String(t).replace("T", " ").split(".")[0];
+  }
+
+  function toast(msg, type) {
+    type = type || "info";
+    var t = el("div", { class: "toast " + type, text: msg });
+    var mount = $("#toast-mount");
+    mount.appendChild(t);
+    setTimeout(function(){
+      t.style.transition = "opacity 0.3s";
+      t.style.opacity = "0";
+      setTimeout(function(){ if (t.parentNode) t.parentNode.removeChild(t); }, 300);
+    }, 3000);
+  }
+
+  function showModal(opts) {
+    closeModal();
+    var mount = $("#modal-mount");
+    var mask = el("div", { class: "modal-mask" });
+    var body = el("div", { class: "modal" });
+    if (opts.title) body.appendChild(el("h3", { text: opts.title }));
+    if (opts.content) {
+      if (typeof opts.content === "string") body.appendChild(el("div", { html: opts.content }));
+      else body.appendChild(opts.content);
+    }
+    if (opts.actions) {
+      var bar = el("div", { class: "actions" });
+      opts.actions.forEach(function(a){
+        var btn = el("button", { class: "btn " + (a.cls || ""), text: a.label });
+        btn.addEventListener("click", function(){ if (a.handler) a.handler(); });
+        bar.appendChild(btn);
+      });
+      body.appendChild(bar);
+    }
+    mask.appendChild(body);
+    mount.appendChild(mask);
+    mask.addEventListener("click", function(e){ if (e.target === mask) closeModal(); });
+    document.addEventListener("keydown", escClose);
+  }
+  function closeModal() {
+    var mount = $("#modal-mount");
+    while (mount.firstChild) mount.removeChild(mount.firstChild);
+    document.removeEventListener("keydown", escClose);
+  }
+  function escClose(e) { if (e.key === "Escape") closeModal(); }
+
+  function confirmDialog(message, onYes) {
+    showModal({
+      title: "确认",
+      content: el("div", { text: message }),
+      actions: [
+        { label: "取消", handler: closeModal },
+        { label: "确认", cls: "btn-danger", handler: function(){ closeModal(); onYes(); } }
+      ]
+    });
+  }
+
+  async function api(method, endpoint, params, body) {
+    if (!bridge) throw new Error("bridge not ready");
+    if (method === "GET") {
+      return await bridge.apiGet(endpoint, params || {});
+    }
+    if (method === "POST") {
+      return await bridge.apiPost(endpoint, body || {});
+    }
+    throw new Error("bridge does not support method " + method);
+  }
+  function apiGet(endpoint, params) { return api("GET", endpoint, params); }
+  function apiPost(endpoint, body) { return api("POST", endpoint, null, body); }
+  // 桥（window.AstrBotPluginPage）只暴露 apiGet/apiPost，不支持 PATCH/DELETE；
+  // 更新与删除一律走 POST 动作后缀路由（<id>/update、<id>/delete）。
+  function apiUpdate(endpoint, body) { return apiPost(endpoint + "/update", body); }
+  function apiDelete(endpoint) { return apiPost(endpoint + "/delete"); }
+
+  function switchTab(name) {
+    state.tab = name;
+    $$(".tab").forEach(function(t){
+      if (t.getAttribute("data-tab") === name) t.classList.add("active");
+      else t.classList.remove("active");
+    });
+    render();
+  }
+  function bindTabs() {
+    $$(".tab").forEach(function(t){
+      t.addEventListener("click", function(){ switchTab(t.getAttribute("data-tab")); });
+    });
+    $("#btn-refresh").addEventListener("click", function(){ render(); });
+  }
+
+  function render() {
+    var content = $("#content");
+    content.innerHTML = '<div class="loading-overlay"><span class="spinner"></span> 加载中...</div>';
+    if (state.tab === "overview") return renderOverview();
+    if (state.tab === "violations") return renderViolations();
+    if (state.tab === "audits") return renderAudits();
+    if (state.tab === "whitelist") return renderWhitelist();
+    if (state.tab === "blacklist") return renderBlacklist();
+    if (state.tab === "users") return renderUsers();
+  }
+
+  function buildSimpleTable(headers, rows) {
+    var wrap = el("div", { class: "table-wrap" });
+    var tbl = el("table");
+    var thead = el("thead");
+    var trh = el("tr");
+    headers.forEach(function(h){ trh.appendChild(el("th", { text: h })); });
+    thead.appendChild(trh);
+    tbl.appendChild(thead);
+    var tbody = el("tbody");
+    if (rows.length === 0) {
+      var trE = el("tr");
+      var tdE = el("td", { text: "暂无数据" });
+      tdE.setAttribute("colspan", headers.length);
+      tdE.style.textAlign = "center";
+      tdE.style.color = "var(--text-2)";
+      trE.appendChild(tdE);
+      tbody.appendChild(trE);
+    } else {
+      rows.forEach(function(row){
+        var tr = el("tr");
+        row.forEach(function(cell, i){
+          var td = el("td", { text: cell == null ? "" : String(cell) });
+          td.setAttribute("data-label", headers[i] || "");
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      });
+    }
+    tbl.appendChild(tbody);
+    wrap.appendChild(tbl);
+    return wrap;
+  }
+
+  function buildPagination(page, pageSize, total, onChange) {
+    var totalPages = Math.max(1, Math.ceil(total / pageSize));
+    var box = el("div", { class: "pagination" });
+    var prev = el("button", { class: "btn btn-sm", text: "上一页" });
+    prev.disabled = page <= 1;
+    prev.addEventListener("click", function(){ onChange(page - 1); });
+    var next = el("button", { class: "btn btn-sm", text: "下一页" });
+    next.disabled = page >= totalPages;
+    next.addEventListener("click", function(){ onChange(page + 1); });
+    box.appendChild(prev);
+    box.appendChild(el("div", { class: "info", text: "第 " + page + " 页 / 共 " + totalPages + " 页" }));
+    box.appendChild(next);
+    return box;
+  }
+
+  function makeInput(name, value, placeholder) {
+    var input = el("input", { type: "text", name: name, placeholder: placeholder || "" });
+    input.value = value || "";
+    return input;
+  }
+  function makeButton(text, cls, onClick) {
+    var b = el("button", { class: "btn " + (cls || ""), text: text });
+    b.addEventListener("click", onClick);
+    return b;
+  }
+  function makeFormRow(label, name, value, textarea) {
+    var row = el("div", { class: "form-row" });
+    row.appendChild(el("label", { text: label }));
+    var input;
+    if (textarea) input = el("textarea", { name: name });
+    else input = el("input", { type: "text", name: name });
+    input.value = value || "";
+    row.appendChild(input);
+    return row;
+  }
+
+  var groupsCache = null;
+  async function fetchGroups() {
+    if (groupsCache) return groupsCache;
+    try {
+      var data = await apiGet("groups");
+      groupsCache = Array.isArray(data) ? data : (data && data.items) || [];
+      return groupsCache;
+    } catch (e) {
+      groupsCache = [];
+      return groupsCache;
+    }
+  }
+
+  function makeSortTh(label, sortKey, stateObj, listKey, onSortChange) {
+    var th = el("th");
+    if (!sortKey) { th.appendChild(document.createTextNode(label || "")); return th; }
+    th.style.cursor = "pointer"; th.style.userSelect = "none"; th.setAttribute("title", "点击排序");
+    th.appendChild(document.createTextNode(label));
+    if (stateObj.sort_by === sortKey) th.appendChild(document.createTextNode(stateObj.sort_dir === "asc" ? " ▲" : " ▼"));
+    th.addEventListener("click", function(){
+      if (stateObj.sort_by === sortKey) stateObj.sort_dir = stateObj.sort_dir === "asc" ? "desc" : "asc";
+      else { stateObj.sort_by = sortKey; stateObj.sort_dir = "desc"; }
+      if ("page" in stateObj) stateObj.page = 1;
+      try { localStorage.setItem("image_review_sort_" + listKey, JSON.stringify({sort_by: stateObj.sort_by, sort_dir: stateObj.sort_dir})); } catch(e){}
+      onSortChange();
+    });
+    return th;
+  }
+  function loadSort(listKey, stateObj) {
+    try { var raw = localStorage.getItem("image_review_sort_" + listKey); if (raw) { var o = JSON.parse(raw); stateObj.sort_by = o.sort_by || ""; stateObj.sort_dir = o.sort_dir || ""; } } catch(e){}
+  }
+
+  function makeDateInput(name, value) { var i = el("input", { type: "date", name: name }); i.value = value || ""; i.style.width = "135px"; return i; }
+  function makeGroupSelect(currentVal, includeGlobal) {
+    var sel = el("select", { name: "group_id" });
+    sel.appendChild(el("option", { value: "", text: "全部" }));
+    if (includeGlobal) sel.appendChild(el("option", { value: "global", text: "全局" }));
+    (groupsCache || []).forEach(function(g){
+      var label = (g.group_name || g.group_id) + " (" + g.group_id + ")";
+      sel.appendChild(el("option", { value: g.group_id, text: label }));
+    });
+    sel.value = currentVal || "";
+    return sel;
+  }
+  // 风险等级下拉；labels = [pass 文案, review 文案, block 文案]，值固定 ""/0/1/2
+  function makeRiskSelect(currentVal, labels) {
+    var sel = el("select", { name: "risk_level" });
+    [["", "全部"], ["0", labels[0]], ["1", labels[1]], ["2", labels[2]]].forEach(function(opt){
+      var o = el("option", { value: opt[0], text: opt[1] });
+      if ((currentVal || "") === opt[0]) o.selected = true;
+      sel.appendChild(o);
+    });
+    return sel;
+  }
+  // risk_level → badge 样式 + 中文名
+  function riskBadgeInfo(level) {
+    var lv = parseInt(level, 10);
+    if (lv === 0) return { cls: "badge-success", text: "通过" };
+    if (lv === 1) return { cls: "badge-warn", text: "复审" };
+    if (lv === 2) return { cls: "badge-danger", text: "违规" };
+    return { cls: "badge-muted", text: "-" };
+  }
+  function isValidMd5(s) { return /^[0-9a-fA-F]{32}$/.test(s); }
+
+  async function renderOverview() {
+    var content = $("#content");
+    try {
+      await fetchGroups();
+      var data = await apiGet("stats/overview");
+      content.innerHTML = "";
+      var stats = data || {};
+
+      // 第一行：6 张统计卡片
+      var grid = el("div", { class: "stat-grid six" });
+      var manualCount = (stats.whitelist_count || 0) + (stats.blacklist_count || 0);
+      [
+        { label: "今日审核", value: stats.today_audits || 0 },
+        { label: "今日违规", value: stats.today_violations || 0 },
+        { label: "累计审核", value: stats.total_audits || 0 },
+        { label: "累计违规", value: stats.total_violations || 0 },
+        { label: "档案数", value: stats.user_profiles_count || 0 },
+        { label: "人工名单数", value: manualCount }
+      ].forEach(function(c){
+        grid.appendChild(el("div", { class: "stat-card" }, [
+          el("div", { class: "label", text: c.label }),
+          el("div", { class: "value", text: String(c.value) })
+        ]));
+      });
+      content.appendChild(grid);
+
+      // 第二行：审核状态数量（Pass/Review/Block）
+      content.appendChild(el("div", { class: "section-title", text: "审核状态数量" }));
+      var dist = stats.risk_distribution || {};
+      var rGrid = el("div", { class: "stat-grid three" });
+      [
+        { label: "通过 Pass", value: dist.pass || 0, color: "var(--success)" },
+        { label: "待复审 Review", value: dist.review || 0, color: "var(--warn)" },
+        { label: "违规 Block", value: dist.block || 0, color: "var(--danger)" }
+      ].forEach(function(c){
+        var val = el("div", { class: "value", text: String(c.value) });
+        val.style.color = c.color;
+        rGrid.appendChild(el("div", { class: "stat-card" }, [
+          el("div", { class: "label", text: c.label }),
+          val
+        ]));
+      });
+      content.appendChild(rGrid);
+
+      // 近 7 天趋势双柱图
+      content.appendChild(el("div", { class: "section-title", text: "近 7 天趋势" }));
+      var trend = stats.trend_7days || [];
+      var maxVal = 1;
+      trend.forEach(function(d){
+        if ((d.audits || 0) > maxVal) maxVal = d.audits;
+        if ((d.violations || 0) > maxVal) maxVal = d.violations;
+      });
+      var chart = el("div", { class: "chart" });
+      if (trend.length === 0) {
+        chart.appendChild(el("div", { class: "empty", text: "暂无数据" }));
+      } else {
+        trend.forEach(function(d){
+          var day = el("div", { class: "chart-day" });
+          var bars = el("div", { class: "chart-bars" });
+          var bAud = el("div", { class: "chart-bar" });
+          bAud.style.height = Math.max(1, Math.round((d.audits || 0) / maxVal * 100)) + "%";
+          bAud.title = "审核 " + (d.audits || 0);
+          var bVio = el("div", { class: "chart-bar violation" });
+          bVio.style.height = Math.max(1, Math.round((d.violations || 0) / maxVal * 100)) + "%";
+          bVio.title = "违规 " + (d.violations || 0);
+          bars.appendChild(bAud);
+          bars.appendChild(bVio);
+          day.appendChild(bars);
+          day.appendChild(el("div", { class: "chart-label", text: (d.date || "").slice(5) }));
+          chart.appendChild(day);
+        });
+      }
+      content.appendChild(chart);
+      var legend = el("div", { class: "legend" });
+      var li1 = el("div", { class: "legend-item" });
+      var dot1 = el("div", { class: "legend-dot" });
+      dot1.style.background = "var(--primary)";
+      li1.appendChild(dot1);
+      li1.appendChild(document.createTextNode("审核"));
+      var li2 = el("div", { class: "legend-item" });
+      var dot2 = el("div", { class: "legend-dot" });
+      dot2.style.background = "var(--danger)";
+      li2.appendChild(dot2);
+      li2.appendChild(document.createTextNode("违规"));
+      legend.appendChild(li1);
+      legend.appendChild(li2);
+      content.appendChild(legend);
+
+      // 双栏：Top 10 违规用户 + 各群分布
+      var dual = el("div", { class: "dual-col" });
+      var col1 = el("div");
+      col1.appendChild(el("div", { class: "section-title", text: "Top 10 违规用户" }));
+      var topUsers = stats.top_violators || [];
+      col1.appendChild(buildSimpleTable(
+        ["用户ID", "昵称", "违规次数"],
+        topUsers.map(function(u){ return [u.user_id, u.nickname || "-", u.violation_count || 0]; })
+      ));
+      dual.appendChild(col1);
+      var col2 = el("div");
+      col2.appendChild(el("div", { class: "section-title", text: "各群分布" }));
+      var gmap = {};
+      (groupsCache || []).forEach(function(g){ if (g.group_name) gmap[g.group_id] = g.group_name; });
+      var groups = stats.group_distribution || [];
+      col2.appendChild(buildSimpleTable(
+        ["群", "审核数", "违规数"],
+        groups.map(function(g){
+          var label = gmap[g.group_id] ? (gmap[g.group_id] + " (" + g.group_id + ")") : g.group_id;
+          return [label, g.audits || 0, g.violations || 0];
+        })
+      ));
+      dual.appendChild(col2);
+      content.appendChild(dual);
+    } catch (e) {
+      content.innerHTML = "";
+      content.appendChild(el("div", { class: "empty", text: "加载失败: " + (e.message || e) }));
+      toast("加载概览失败: " + (e.message || e), "error");
+    }
+  }
+
+  async function renderViolations() {
+    var content = $("#content");
+    var s = state.violations;
+    await fetchGroups();
+    var filter = el("div", { class: "filter-bar" });
+    var selGid = makeGroupSelect(s.group_id, false);
+    var inUid = makeInput("user_id", s.user_id, "用户ID");
+    var inKw = makeInput("keyword", s.keyword, "关键字");
+    var selRisk = makeRiskSelect(s.risk_level, ["Pass", "Review", "Block"]);
+    var inDf = makeDateInput("date_from", s.date_from);
+    var inDt = makeDateInput("date_to", s.date_to);
+    filter.appendChild(selGid);
+    filter.appendChild(inUid);
+    filter.appendChild(inKw);
+    filter.appendChild(selRisk);
+    filter.appendChild(document.createTextNode(" 起"));
+    filter.appendChild(inDf);
+    filter.appendChild(document.createTextNode(" 止"));
+    filter.appendChild(inDt);
+    filter.appendChild(makeButton("搜索", "btn-primary", function(){
+      s.group_id = selGid.value;
+      s.user_id = inUid.value.trim();
+      s.keyword = inKw.value.trim();
+      s.risk_level = selRisk.value;
+      s.date_from = inDf.value;
+      s.date_to = inDt.value;
+      s.page = 1;
+      renderViolations();
+    }));
+
+    var selectedIds = Object.keys(s.selected).filter(function(k){ return s.selected[k]; });
+    var toolbar = el("div", { class: "toolbar" });
+    var btnBatch = el("button", { class: "btn btn-danger", text: "批量删除 (" + selectedIds.length + ")" });
+    btnBatch.disabled = selectedIds.length === 0;
+    btnBatch.addEventListener("click", function(){
+      confirmDialog("确认删除选中的 " + selectedIds.length + " 条违规记录？", async function(){
+        try {
+          await apiPost("violations/batch_delete", { ids: selectedIds.map(function(x){ return parseInt(x, 10); }) });
+          toast("批量删除成功", "success");
+          s.selected = {};
+          renderViolations();
+        } catch (e) { toast("删除失败: " + (e.message || e), "error"); }
+      });
+    });
+    toolbar.appendChild(btnBatch);
+    toolbar.appendChild(el("div", { class: "info", text: "共 " + s.total + " 条" }));
+
+    content.innerHTML = "";
+    content.appendChild(filter);
+    content.appendChild(toolbar);
+    var loading = el("div", { class: "loading-overlay", html: '<span class="spinner"></span> 加载中...' });
+    content.appendChild(loading);
+
+    try {
+      var data = await apiGet("violations", {
+        page: s.page, page_size: s.page_size,
+        group_id: s.group_id, user_id: s.user_id, keyword: s.keyword,
+        risk_level: s.risk_level === "" ? undefined : s.risk_level,
+        date_from: s.date_from || undefined, date_to: s.date_to || undefined,
+        sort_by: s.sort_by || undefined, sort_dir: s.sort_dir || undefined
+      });
+      s.items = data.items || [];
+      s.total = data.total || 0;
+      content.removeChild(loading);
+
+      var wrap = el("div", { class: "table-wrap" });
+      var tbl = el("table");
+      var thead = el("thead");
+      var trh = el("tr");
+      var onSort = function(){ renderViolations(); };
+      trh.appendChild(makeSortTh("", null, s, "violations", onSort));
+      trh.appendChild(makeSortTh("ID", "id", s, "violations", onSort));
+      trh.appendChild(makeSortTh("时间", "violation_time", s, "violations", onSort));
+      trh.appendChild(makeSortTh("群", "group_id", s, "violations", onSort));
+      trh.appendChild(makeSortTh("用户", "user_id", s, "violations", onSort));
+      trh.appendChild(makeSortTh("风险等级", "risk_level", s, "violations", onSort));
+      trh.appendChild(makeSortTh("LLM 分析", null, s, "violations", onSort));
+      trh.appendChild(makeSortTh("处理措施", null, s, "violations", onSort));
+      trh.appendChild(makeSortTh("备注", null, s, "violations", onSort));
+      trh.appendChild(makeSortTh("图片", null, s, "violations", onSort));
+      trh.appendChild(makeSortTh("操作", null, s, "violations", onSort));
+      thead.appendChild(trh);
+      tbl.appendChild(thead);
+      var tbody = el("tbody");
+      if (s.items.length === 0) {
+        var trE = el("tr");
+        var tdE = el("td", { text: "暂无数据" });
+        tdE.setAttribute("colspan", 11);
+        tdE.style.textAlign = "center";
+        tdE.style.color = "var(--text-2)";
+        trE.appendChild(tdE);
+        tbody.appendChild(trE);
+      } else {
+        s.items.forEach(function(row){
+          var tr = el("tr");
+          var cb = el("input", { type: "checkbox" });
+          cb.checked = !!s.selected[row.id];
+          cb.addEventListener("change", function(){
+            if (cb.checked) s.selected[row.id] = true;
+            else delete s.selected[row.id];
+            renderViolations();
+          });
+          var tdCb = el("td"); tdCb.setAttribute("data-label", "选择"); tdCb.appendChild(cb); tr.appendChild(tdCb);
+          var tdId = el("td", { text: String(row.id) }); tdId.setAttribute("data-label", "ID"); tr.appendChild(tdId);
+          var tdT = el("td", { text: fmtTime(row.violation_time) }); tdT.setAttribute("data-label", "时间"); tr.appendChild(tdT);
+          var tdG = el("td", { text: row.group_id || "-" }); tdG.setAttribute("data-label", "群"); tr.appendChild(tdG);
+          var tdU = el("td", { text: (row.user_name || "") + " (" + (row.user_id || "") + ")" }); tdU.setAttribute("data-label", "用户"); tr.appendChild(tdU);
+          var tdR = el("td"); tdR.setAttribute("data-label", "风险等级");
+          var rInfo = riskBadgeInfo(row.risk_level);
+          tdR.appendChild(el("span", { class: "badge " + rInfo.cls, text: rInfo.text }));
+          tr.appendChild(tdR);
+          // LLM 分析：截断 40 字，title 显示全文；点击弹窗查看详情
+          var tdReason = el("td", { class: "preview" });
+          tdReason.setAttribute("data-label", "LLM 分析");
+          tdReason.setAttribute("title", row.risk_reason || "");
+          tdReason.style.cursor = "pointer";
+          tdReason.appendChild(document.createTextNode(truncate(row.risk_reason || "", 40) || "-"));
+          tdReason.addEventListener("click", function(){ openViolationDetail(row); });
+          tr.appendChild(tdReason);
+          var mute = parseInt(row.mute_duration, 10) || 0;
+          var tdM = el("td", { text: mute > 0 ? ("禁言" + mute + "s") : "-" }); tdM.setAttribute("data-label", "处理措施"); tr.appendChild(tdM);
+          var tdN = el("td", { text: row.note || "-" }); tdN.setAttribute("data-label", "备注"); tr.appendChild(tdN);
+          // 图片列：有证据时提供「查看」按钮
+          var tdImg = el("td"); tdImg.setAttribute("data-label", "图片");
+          if (row.has_evidence) {
+            var btnImg = el("button", { class: "btn btn-sm", text: "查看" });
+            btnImg.addEventListener("click", function(){ openViolationImage(row); });
+            tdImg.appendChild(btnImg);
+          } else {
+            tdImg.appendChild(document.createTextNode("-"));
+          }
+          tr.appendChild(tdImg);
+          var tdOps = el("td"); tdOps.setAttribute("data-label", "操作");
+          var btnEdit = el("button", { class: "btn btn-sm", text: "改" });
+          btnEdit.addEventListener("click", function(){ openEditViolation(row); });
+          var btnDel = el("button", { class: "btn btn-sm btn-danger", text: "删" });
+          btnDel.style.marginLeft = "4px";
+          btnDel.addEventListener("click", function(){
+            confirmDialog("确认删除违规 #" + row.id + " ？", async function(){
+              try {
+                await apiDelete("violations/" + row.id);
+                toast("已删除", "success");
+                renderViolations();
+              } catch (e) { toast("删除失败: " + (e.message || e), "error"); }
+            });
+          });
+          tdOps.appendChild(btnEdit); tdOps.appendChild(btnDel);
+          tr.appendChild(tdOps);
+          tbody.appendChild(tr);
+        });
+      }
+      tbl.appendChild(tbody);
+      wrap.appendChild(tbl);
+      content.appendChild(wrap);
+      content.appendChild(buildPagination(s.page, s.page_size, s.total, function(p){ s.page = p; renderViolations(); }));
+    } catch (e) {
+      if (loading.parentNode) loading.parentNode.removeChild(loading);
+      content.appendChild(el("div", { class: "empty", text: "加载失败: " + (e.message || e) }));
+      toast("加载违规列表失败: " + (e.message || e), "error");
+    }
+  }
+
+  function openEditViolation(row) {
+    var form = el("div");
+    form.appendChild(makeFormRow("用户名", "user_name", row.user_name || ""));
+    form.appendChild(makeFormRow("备注", "note", row.note || "", true));
+    showModal({
+      title: "编辑违规 #" + row.id,
+      content: form,
+      actions: [
+        { label: "取消", handler: closeModal },
+        { label: "保存", cls: "btn-primary", handler: async function(){
+          var body = {
+            user_name: form.querySelector('[name="user_name"]').value,
+            note: form.querySelector('[name="note"]').value
+          };
+          try {
+            await apiUpdate("violations/" + row.id, body);
+            toast("已保存", "success");
+            closeModal();
+            renderViolations();
+          } catch (e) { toast("保存失败: " + (e.message || e), "error"); }
+        }}
+      ]
+    });
+  }
+
+  // 违规详情：risk_reason 全文 + image_url + md5_hash + message_id
+  function openViolationDetail(row) {
+    var box = el("div");
+    function detailRow(label, val) {
+      var d = el("div", { class: "form-row" });
+      d.appendChild(el("label", { text: label }));
+      d.appendChild(el("div", { class: "readonly-block", text: val == null || val === "" ? "-" : String(val) }));
+      return d;
+    }
+    box.appendChild(detailRow("时间", fmtTime(row.violation_time)));
+    box.appendChild(detailRow("群号", row.group_id || ""));
+    box.appendChild(detailRow("用户", (row.user_name || "") + " (" + (row.user_id || "") + ")"));
+    var rInfo = riskBadgeInfo(row.risk_level);
+    box.appendChild(detailRow("风险等级", rInfo.text + " (" + (row.risk_level == null ? "" : row.risk_level) + ")"));
+    box.appendChild(detailRow("LLM 分析", row.risk_reason || ""));
+    box.appendChild(detailRow("图片 URL", row.image_url || ""));
+    box.appendChild(detailRow("MD5", row.md5_hash || ""));
+    box.appendChild(detailRow("消息 ID", row.message_id || ""));
+    showModal({
+      title: "违规详情 #" + row.id,
+      content: box,
+      actions: [{ label: "关闭", handler: closeModal }]
+    });
+  }
+
+  // 证据图片查看：优先走 violations/<id>/image（base64 data URI），
+  // API 失败或无证据时降级为 image_url 直连，再没有则提示无证据图片
+  async function openViolationImage(row) {
+    var holder = el("div", { class: "loading-overlay", html: '<span class="spinner"></span> 图片加载中...' });
+    showModal({
+      title: "证据图片 #" + row.id,
+      content: holder,
+      actions: [{ label: "关闭", handler: closeModal }]
+    });
+    var dataUri = null;
+    try {
+      var data = await apiGet("violations/" + row.id + "/image");
+      if (data && data.has_evidence && data.data) {
+        var mime = (data.mime && String(data.mime).indexOf("image/") === 0) ? String(data.mime) : "image/jpeg";
+        dataUri = "data:" + mime + ";base64," + data.data;
+      }
+    } catch (e) { /* 走降级分支 */ }
+    holder.innerHTML = "";
+    holder.className = "";
+    if (dataUri) {
+      var img = el("img", { class: "evidence-img" });
+      img.setAttribute("src", dataUri);
+      holder.appendChild(img);
+    } else if (row.image_url && String(row.image_url).indexOf("http") === 0) {
+      var img2 = el("img", { class: "evidence-img" });
+      img2.setAttribute("src", row.image_url);
+      img2.addEventListener("error", function(){
+        holder.textContent = "图片加载失败（原 URL 不可访问）：" + row.image_url;
+      });
+      holder.appendChild(img2);
+      holder.appendChild(el("div", { class: "empty", style: "padding:8px;", text: "已降级显示原始 URL（无本地证据缓存）" }));
+    } else {
+      holder.appendChild(el("div", { class: "empty", text: "无证据图片" }));
+    }
+  }
+
+  async function renderAudits() {
+    var content = $("#content");
+    var s = state.audits;
+    await fetchGroups();
+    var filter = el("div", { class: "filter-bar" });
+    var selGid = makeGroupSelect(s.group_id, false);
+    filter.appendChild(selGid);
+    var selRisk = makeRiskSelect(s.risk_level, ["通过", "复审", "违规"]);
+    filter.appendChild(selRisk);
+    var inKw = makeInput("keyword", s.keyword, "关键字");
+    filter.appendChild(inKw);
+    var inDf = makeDateInput("date_from", s.date_from);
+    var inDt = makeDateInput("date_to", s.date_to);
+    filter.appendChild(document.createTextNode(" 起"));
+    filter.appendChild(inDf);
+    filter.appendChild(document.createTextNode(" 止"));
+    filter.appendChild(inDt);
+    filter.appendChild(makeButton("搜索", "btn-primary", function(){
+      s.group_id = selGid.value;
+      s.risk_level = selRisk.value;
+      s.keyword = inKw.value.trim();
+      s.date_from = inDf.value;
+      s.date_to = inDt.value;
+      s.page = 1;
+      renderAudits();
+    }));
+
+    var selectedIds = Object.keys(s.selected).filter(function(k){ return s.selected[k]; });
+    var toolbar = el("div", { class: "toolbar" });
+    var btnBatch = el("button", { class: "btn btn-danger", text: "批量删除 (" + selectedIds.length + ")" });
+    btnBatch.disabled = selectedIds.length === 0;
+    btnBatch.addEventListener("click", function(){
+      confirmDialog("确认删除选中的 " + selectedIds.length + " 条审核日志？", async function(){
+        try {
+          await apiPost("audits/batch_delete", { ids: selectedIds.map(function(x){ return parseInt(x, 10); }) });
+          toast("批量删除成功", "success");
+          s.selected = {};
+          renderAudits();
+        } catch (e) { toast("删除失败: " + (e.message || e), "error"); }
+      });
+    });
+    toolbar.appendChild(btnBatch);
+    toolbar.appendChild(el("div", { class: "info", text: "共 " + s.total + " 条" }));
+
+    content.innerHTML = "";
+    content.appendChild(filter);
+    content.appendChild(toolbar);
+    var loading = el("div", { class: "loading-overlay", html: '<span class="spinner"></span> 加载中...' });
+    content.appendChild(loading);
+
+    try {
+      var data = await apiGet("audits", {
+        page: s.page, page_size: s.page_size,
+        group_id: s.group_id,
+        risk_level: s.risk_level === "" ? undefined : s.risk_level,
+        keyword: s.keyword,
+        date_from: s.date_from || undefined, date_to: s.date_to || undefined,
+        sort_by: s.sort_by || undefined, sort_dir: s.sort_dir || undefined
+      });
+      s.items = data.items || [];
+      s.total = data.total || 0;
+      content.removeChild(loading);
+
+      var wrap = el("div", { class: "table-wrap" });
+      var tbl = el("table");
+      var thead = el("thead");
+      var trh = el("tr");
+      var onSort = function(){ renderAudits(); };
+      trh.appendChild(makeSortTh("", null, s, "audits", onSort));
+      trh.appendChild(makeSortTh("ID", "id", s, "audits", onSort));
+      trh.appendChild(makeSortTh("时间", "created_at", s, "audits", onSort));
+      trh.appendChild(makeSortTh("群", "group_id", s, "audits", onSort));
+      trh.appendChild(makeSortTh("用户", "user_id", s, "audits", onSort));
+      trh.appendChild(makeSortTh("MD5", null, s, "audits", onSort));
+      trh.appendChild(makeSortTh("风险等级", "risk_level", s, "audits", onSort));
+      trh.appendChild(makeSortTh("分析", null, s, "audits", onSort));
+      trh.appendChild(makeSortTh("来源", null, s, "audits", onSort));
+      trh.appendChild(makeSortTh("操作", null, s, "audits", onSort));
+      thead.appendChild(trh);
+      tbl.appendChild(thead);
+      var tbody = el("tbody");
+      if (s.items.length === 0) {
+        var trE = el("tr");
+        var tdE = el("td", { text: "暂无数据" });
+        tdE.setAttribute("colspan", 10);
+        tdE.style.textAlign = "center";
+        tdE.style.color = "var(--text-2)";
+        trE.appendChild(tdE);
+        tbody.appendChild(trE);
+      } else {
+        s.items.forEach(function(row){
+          var tr = el("tr");
+          var cb = el("input", { type: "checkbox" });
+          cb.checked = !!s.selected[row.id];
+          cb.addEventListener("change", function(){
+            if (cb.checked) s.selected[row.id] = true;
+            else delete s.selected[row.id];
+            renderAudits();
+          });
+          var tdCb = el("td"); tdCb.setAttribute("data-label", "选择"); tdCb.appendChild(cb); tr.appendChild(tdCb);
+          var tdId = el("td", { text: String(row.id) }); tdId.setAttribute("data-label", "ID"); tr.appendChild(tdId);
+          var tdT = el("td", { text: fmtTime(row.created_at) }); tdT.setAttribute("data-label", "时间"); tr.appendChild(tdT);
+          var tdG = el("td", { text: row.group_id || "-" }); tdG.setAttribute("data-label", "群"); tr.appendChild(tdG);
+          var tdU = el("td", { text: (row.user_name || "") + " (" + (row.user_id || "") + ")" }); tdU.setAttribute("data-label", "用户"); tr.appendChild(tdU);
+          var tdMd5 = el("td", { class: "preview", text: truncate(row.md5_hash || "", 12) || "-" });
+          tdMd5.setAttribute("data-label", "MD5");
+          tdMd5.setAttribute("title", row.md5_hash || "");
+          tr.appendChild(tdMd5);
+          var tdR = el("td"); tdR.setAttribute("data-label", "风险等级");
+          var rInfo = riskBadgeInfo(row.risk_level);
+          tdR.appendChild(el("span", { class: "badge " + rInfo.cls, text: rInfo.text }));
+          tr.appendChild(tdR);
+          var tdReason = el("td", { class: "preview", text: truncate(row.risk_reason || "", 40) || "-" });
+          tdReason.setAttribute("data-label", "分析");
+          tdReason.setAttribute("title", row.risk_reason || "");
+          tr.appendChild(tdReason);
+          var tdS = el("td", { text: row.source || "-" }); tdS.setAttribute("data-label", "来源"); tr.appendChild(tdS);
+          var tdOps = el("td"); tdOps.setAttribute("data-label", "操作");
+          var btnView = el("button", { class: "btn btn-sm", text: "详情" });
+          btnView.addEventListener("click", function(){ openAuditDetail(row); });
+          var btnDel = el("button", { class: "btn btn-sm btn-danger", text: "删" });
+          btnDel.style.marginLeft = "4px";
+          btnDel.addEventListener("click", function(){
+            confirmDialog("确认删除审核日志 #" + row.id + " ？", async function(){
+              try {
+                await apiDelete("audits/" + row.id);
+                toast("已删除", "success");
+                renderAudits();
+              } catch (e) { toast("删除失败: " + (e.message || e), "error"); }
+            });
+          });
+          tdOps.appendChild(btnView); tdOps.appendChild(btnDel);
+          tr.appendChild(tdOps);
+          tbody.appendChild(tr);
+        });
+      }
+      tbl.appendChild(tbody);
+      wrap.appendChild(tbl);
+      content.appendChild(wrap);
+      content.appendChild(buildPagination(s.page, s.page_size, s.total, function(p){ s.page = p; renderAudits(); }));
+    } catch (e) {
+      if (loading.parentNode) loading.parentNode.removeChild(loading);
+      content.appendChild(el("div", { class: "empty", text: "加载失败: " + (e.message || e) }));
+      toast("加载审核日志失败: " + (e.message || e), "error");
+    }
+  }
+
+  function openAuditDetail(row) {
+    var box = el("div");
+    function detailRow(label, val) {
+      var d = el("div", { class: "form-row" });
+      d.appendChild(el("label", { text: label }));
+      d.appendChild(el("div", { class: "readonly-block", text: val == null || val === "" ? "-" : String(val) }));
+      return d;
+    }
+    box.appendChild(detailRow("时间", fmtTime(row.created_at)));
+    box.appendChild(detailRow("群号", row.group_id || ""));
+    box.appendChild(detailRow("用户", (row.user_name || "") + " (" + (row.user_id || "") + ")"));
+    box.appendChild(detailRow("MD5", row.md5_hash || ""));
+    var rInfo = riskBadgeInfo(row.risk_level);
+    box.appendChild(detailRow("风险等级", rInfo.text + " (" + (row.risk_level == null ? "" : row.risk_level) + ")"));
+    box.appendChild(detailRow("LLM 分析", row.risk_reason || ""));
+    box.appendChild(detailRow("来源", row.source || ""));
+    showModal({
+      title: "审核详情 #" + row.id,
+      content: box,
+      actions: [{ label: "关闭", handler: closeModal }]
+    });
+  }
+
+  async function renderWhitelist() {
+    var content = $("#content");
+    var s = state.whitelist;
+    await fetchGroups();
+    var filter = el("div", { class: "filter-bar" });
+    var selGid = makeGroupSelect(s.group_id_filter, true);
+    filter.appendChild(selGid);
+    filter.appendChild(makeButton("搜索", "btn-primary", function(){
+      s.group_id_filter = selGid.value;
+      renderWhitelist();
+    }));
+
+    var toolbar = el("div", { class: "toolbar" });
+    var btnAdd = el("button", { class: "btn btn-primary", text: "+ 新增" });
+    btnAdd.addEventListener("click", openCreateWhitelist);
+    toolbar.appendChild(btnAdd);
+    var info = el("div", { class: "info", text: "共 " + s.total + " 项" });
+    toolbar.appendChild(info);
+
+    content.innerHTML = "";
+    content.appendChild(filter);
+    content.appendChild(toolbar);
+    var loading = el("div", { class: "loading-overlay", html: '<span class="spinner"></span> 加载中...' });
+    content.appendChild(loading);
+
+    try {
+      var data = await apiGet("whitelist", {
+        group_id: s.group_id_filter === "" ? "all" : s.group_id_filter,
+        sort_by: s.sort_by || undefined,
+        sort_dir: s.sort_dir || undefined
+      });
+      s.items = (data && data.items) || [];
+      s.total = (data && data.total) || s.items.length;
+      info.textContent = "共 " + s.total + " 项";
+      content.removeChild(loading);
+
+      var wrap = el("div", { class: "table-wrap" });
+      var tbl = el("table");
+      var thead = el("thead");
+      var trh = el("tr");
+      var onSort = function(){ renderWhitelist(); };
+      trh.appendChild(makeSortTh("ID", "id", s, "whitelist", onSort));
+      trh.appendChild(makeSortTh("MD5", null, s, "whitelist", onSort));
+      trh.appendChild(makeSortTh("范围", "group_id", s, "whitelist", onSort));
+      trh.appendChild(makeSortTh("添加人", null, s, "whitelist", onSort));
+      trh.appendChild(makeSortTh("备注", null, s, "whitelist", onSort));
+      trh.appendChild(makeSortTh("添加时间", "created_at", s, "whitelist", onSort));
+      trh.appendChild(makeSortTh("操作", null, s, "whitelist", onSort));
+      thead.appendChild(trh);
+      tbl.appendChild(thead);
+      var tbody = el("tbody");
+      if (s.items.length === 0) {
+        var trE = el("tr");
+        var tdE = el("td", { text: "暂无数据" });
+        tdE.setAttribute("colspan", 7);
+        tdE.style.textAlign = "center";
+        tdE.style.color = "var(--text-2)";
+        trE.appendChild(tdE);
+        tbody.appendChild(trE);
+      } else {
+        s.items.forEach(function(row){
+          var tr = el("tr");
+          var tdId = el("td", { text: String(row.id) }); tdId.setAttribute("data-label", "ID"); tr.appendChild(tdId);
+          var tdM = el("td", { class: "preview", text: row.md5_hash || "" }); tdM.setAttribute("data-label", "MD5"); tr.appendChild(tdM);
+          var tdG = el("td", { text: row.group_id ? row.group_id : "全局" }); tdG.setAttribute("data-label", "范围"); tr.appendChild(tdG);
+          var tdBy = el("td", { text: row.added_by || "-" }); tdBy.setAttribute("data-label", "添加人"); tr.appendChild(tdBy);
+          var tdN = el("td", { text: row.reason || "-" }); tdN.setAttribute("data-label", "备注"); tr.appendChild(tdN);
+          var tdT = el("td", { text: fmtTime(row.created_at) }); tdT.setAttribute("data-label", "添加时间"); tr.appendChild(tdT);
+          var tdOps = el("td"); tdOps.setAttribute("data-label", "操作");
+          var btnEdit = el("button", { class: "btn btn-sm", text: "改备注" });
+          btnEdit.addEventListener("click", function(){ openEditWhitelist(row); });
+          var btnDel = el("button", { class: "btn btn-sm btn-danger", text: "删" });
+          btnDel.style.marginLeft = "4px";
+          btnDel.addEventListener("click", function(){
+            confirmDialog("确认从白名单删除 MD5:" + (row.md5_hash || "") + " ？", async function(){
+              try {
+                await apiDelete("whitelist/" + row.id);
+                toast("已删除", "success");
+                renderWhitelist();
+              } catch (e) { toast("删除失败: " + (e.message || e), "error"); }
+            });
+          });
+          tdOps.appendChild(btnEdit); tdOps.appendChild(btnDel);
+          tr.appendChild(tdOps);
+          tbody.appendChild(tr);
+        });
+      }
+      tbl.appendChild(tbody);
+      wrap.appendChild(tbl);
+      content.appendChild(wrap);
+    } catch (e) {
+      if (loading.parentNode) loading.parentNode.removeChild(loading);
+      content.appendChild(el("div", { class: "empty", text: "加载失败: " + (e.message || e) }));
+      toast("加载白名单失败: " + (e.message || e), "error");
+    }
+  }
+
+  function openCreateWhitelist() {
+    var form = el("div");
+    form.appendChild(makeFormRow("MD5（32 位十六进制）", "md5_hash", ""));
+    // 群选择：全局（空=全局） + 各群
+    var groupRow = el("div", { class: "form-row" });
+    groupRow.appendChild(el("label", { text: "群（空=全局）" }));
+    var gSel = el("select", { name: "group_id" });
+    gSel.appendChild(el("option", { value: "", text: "全局" }));
+    (groupsCache || []).forEach(function(g){
+      var label = (g.group_name || g.group_id) + " (" + g.group_id + ")";
+      gSel.appendChild(el("option", { value: g.group_id, text: label }));
+    });
+    groupRow.appendChild(gSel);
+    form.appendChild(groupRow);
+    form.appendChild(makeFormRow("备注", "reason", "", true));
+    showModal({
+      title: "添加白名单",
+      content: form,
+      actions: [
+        { label: "取消", handler: closeModal },
+        { label: "保存", cls: "btn-primary", handler: async function(){
+          var md5 = form.querySelector('[name="md5_hash"]').value.trim();
+          if (!isValidMd5(md5)) { toast("MD5 必须是 32 位十六进制字符串", "error"); return; }
+          var body = {
+            md5_hash: md5,
+            group_id: form.querySelector('[name="group_id"]').value,
+            reason: form.querySelector('[name="reason"]').value
+          };
+          try {
+            await apiPost("whitelist", body);
+            toast("已添加", "success");
+            closeModal();
+            renderWhitelist();
+          } catch (e) { toast("添加失败: " + (e.message || e), "error"); }
+        }}
+      ]
+    });
+  }
+  function openEditWhitelist(row) {
+    var form = el("div");
+    form.appendChild(makeFormRow("备注", "reason", row.reason || "", true));
+    showModal({
+      title: "编辑白名单备注 #" + row.id,
+      content: form,
+      actions: [
+        { label: "取消", handler: closeModal },
+        { label: "保存", cls: "btn-primary", handler: async function(){
+          var reason = form.querySelector('[name="reason"]').value;
+          try {
+            await apiUpdate("whitelist/" + row.id, { reason: reason });
+            toast("已保存", "success");
+            closeModal();
+            renderWhitelist();
+          } catch (e) { toast("保存失败: " + (e.message || e), "error"); }
+        }}
+      ]
+    });
+  }
+
+  async function renderBlacklist() {
+    var content = $("#content");
+    var s = state.blacklist;
+    await fetchGroups();
+    var filter = el("div", { class: "filter-bar" });
+    var selGid = makeGroupSelect(s.group_id_filter, true);
+    filter.appendChild(selGid);
+    filter.appendChild(makeButton("搜索", "btn-primary", function(){
+      s.group_id_filter = selGid.value;
+      renderBlacklist();
+    }));
+
+    var toolbar = el("div", { class: "toolbar" });
+    var btnAdd = el("button", { class: "btn btn-primary", text: "+ 新增" });
+    btnAdd.addEventListener("click", openCreateBlacklist);
+    toolbar.appendChild(btnAdd);
+    var info = el("div", { class: "info", text: "共 " + s.total + " 项" });
+    toolbar.appendChild(info);
+
+    content.innerHTML = "";
+    content.appendChild(filter);
+    content.appendChild(toolbar);
+    var loading = el("div", { class: "loading-overlay", html: '<span class="spinner"></span> 加载中...' });
+    content.appendChild(loading);
+
+    try {
+      var data = await apiGet("blacklist", {
+        group_id: s.group_id_filter === "" ? "all" : s.group_id_filter,
+        sort_by: s.sort_by || undefined,
+        sort_dir: s.sort_dir || undefined
+      });
+      s.items = (data && data.items) || [];
+      s.total = (data && data.total) || s.items.length;
+      info.textContent = "共 " + s.total + " 项";
+      content.removeChild(loading);
+
+      var wrap = el("div", { class: "table-wrap" });
+      var tbl = el("table");
+      var thead = el("thead");
+      var trh = el("tr");
+      var onSort = function(){ renderBlacklist(); };
+      trh.appendChild(makeSortTh("ID", "id", s, "blacklist", onSort));
+      trh.appendChild(makeSortTh("MD5", null, s, "blacklist", onSort));
+      trh.appendChild(makeSortTh("风险等级", "risk_level", s, "blacklist", onSort));
+      trh.appendChild(makeSortTh("范围", "group_id", s, "blacklist", onSort));
+      trh.appendChild(makeSortTh("添加人", null, s, "blacklist", onSort));
+      trh.appendChild(makeSortTh("备注", null, s, "blacklist", onSort));
+      trh.appendChild(makeSortTh("添加时间", "created_at", s, "blacklist", onSort));
+      trh.appendChild(makeSortTh("操作", null, s, "blacklist", onSort));
+      thead.appendChild(trh);
+      tbl.appendChild(thead);
+      var tbody = el("tbody");
+      if (s.items.length === 0) {
+        var trE = el("tr");
+        var tdE = el("td", { text: "暂无数据" });
+        tdE.setAttribute("colspan", 8);
+        tdE.style.textAlign = "center";
+        tdE.style.color = "var(--text-2)";
+        trE.appendChild(tdE);
+        tbody.appendChild(trE);
+      } else {
+        s.items.forEach(function(row){
+          var tr = el("tr");
+          var tdId = el("td", { text: String(row.id) }); tdId.setAttribute("data-label", "ID"); tr.appendChild(tdId);
+          var tdM = el("td", { class: "preview", text: row.md5_hash || "" }); tdM.setAttribute("data-label", "MD5"); tr.appendChild(tdM);
+          var tdR = el("td"); tdR.setAttribute("data-label", "风险等级");
+          var rInfo = riskBadgeInfo(row.risk_level);
+          var badge = el("span", { class: "badge " + rInfo.cls, text: rInfo.text });
+          if (row.risk_reason) badge.setAttribute("title", row.risk_reason);
+          tdR.appendChild(badge);
+          tr.appendChild(tdR);
+          var tdG = el("td", { text: row.group_id ? row.group_id : "全局" }); tdG.setAttribute("data-label", "范围"); tr.appendChild(tdG);
+          var tdBy = el("td", { text: row.added_by || "-" }); tdBy.setAttribute("data-label", "添加人"); tr.appendChild(tdBy);
+          var tdN = el("td", { text: row.reason || "-" }); tdN.setAttribute("data-label", "备注"); tr.appendChild(tdN);
+          var tdT = el("td", { text: fmtTime(row.created_at) }); tdT.setAttribute("data-label", "添加时间"); tr.appendChild(tdT);
+          var tdOps = el("td"); tdOps.setAttribute("data-label", "操作");
+          var btnEdit = el("button", { class: "btn btn-sm", text: "改备注" });
+          btnEdit.addEventListener("click", function(){ openEditBlacklist(row); });
+          var btnDel = el("button", { class: "btn btn-sm btn-danger", text: "删" });
+          btnDel.style.marginLeft = "4px";
+          btnDel.addEventListener("click", function(){
+            confirmDialog("确认从黑名单删除 MD5:" + (row.md5_hash || "") + " ？", async function(){
+              try {
+                await apiDelete("blacklist/" + row.id);
+                toast("已删除", "success");
+                renderBlacklist();
+              } catch (e) { toast("删除失败: " + (e.message || e), "error"); }
+            });
+          });
+          tdOps.appendChild(btnEdit); tdOps.appendChild(btnDel);
+          tr.appendChild(tdOps);
+          tbody.appendChild(tr);
+        });
+      }
+      tbl.appendChild(tbody);
+      wrap.appendChild(tbl);
+      content.appendChild(wrap);
+    } catch (e) {
+      if (loading.parentNode) loading.parentNode.removeChild(loading);
+      content.appendChild(el("div", { class: "empty", text: "加载失败: " + (e.message || e) }));
+      toast("加载黑名单失败: " + (e.message || e), "error");
+    }
+  }
+
+  function openCreateBlacklist() {
+    var form = el("div");
+    form.appendChild(makeFormRow("MD5（32 位十六进制）", "md5_hash", ""));
+    var levelRow = el("div", { class: "form-row" });
+    levelRow.appendChild(el("label", { text: "风险等级" }));
+    var lSel = el("select", { name: "risk_level" });
+    [["2", "Block（违规）"], ["1", "Review（复审）"]].forEach(function(opt){
+      lSel.appendChild(el("option", { value: opt[0], text: opt[1] }));
+    });
+    levelRow.appendChild(lSel);
+    form.appendChild(levelRow);
+    // 群选择：全局（空=全局） + 各群
+    var groupRow = el("div", { class: "form-row" });
+    groupRow.appendChild(el("label", { text: "群（空=全局）" }));
+    var gSel = el("select", { name: "group_id" });
+    gSel.appendChild(el("option", { value: "", text: "全局" }));
+    (groupsCache || []).forEach(function(g){
+      var label = (g.group_name || g.group_id) + " (" + g.group_id + ")";
+      gSel.appendChild(el("option", { value: g.group_id, text: label }));
+    });
+    groupRow.appendChild(gSel);
+    form.appendChild(groupRow);
+    form.appendChild(makeFormRow("风险原因", "risk_reason", "", true));
+    showModal({
+      title: "添加黑名单",
+      content: form,
+      actions: [
+        { label: "取消", handler: closeModal },
+        { label: "保存", cls: "btn-primary", handler: async function(){
+          var md5 = form.querySelector('[name="md5_hash"]').value.trim();
+          if (!isValidMd5(md5)) { toast("MD5 必须是 32 位十六进制字符串", "error"); return; }
+          var body = {
+            md5_hash: md5,
+            risk_level: parseInt(form.querySelector('[name="risk_level"]').value, 10),
+            risk_reason: form.querySelector('[name="risk_reason"]').value,
+            group_id: form.querySelector('[name="group_id"]').value
+          };
+          try {
+            await apiPost("blacklist", body);
+            toast("已添加", "success");
+            closeModal();
+            renderBlacklist();
+          } catch (e) { toast("添加失败: " + (e.message || e), "error"); }
+        }}
+      ]
+    });
+  }
+  function openEditBlacklist(row) {
+    var form = el("div");
+    form.appendChild(makeFormRow("备注", "reason", row.reason || "", true));
+    showModal({
+      title: "编辑黑名单备注 #" + row.id,
+      content: form,
+      actions: [
+        { label: "取消", handler: closeModal },
+        { label: "保存", cls: "btn-primary", handler: async function(){
+          var reason = form.querySelector('[name="reason"]').value;
+          try {
+            await apiUpdate("blacklist/" + row.id, { reason: reason });
+            toast("已保存", "success");
+            closeModal();
+            renderBlacklist();
+          } catch (e) { toast("保存失败: " + (e.message || e), "error"); }
+        }}
+      ]
+    });
+  }
+
+  async function renderUsers() {
+    var content = $("#content");
+    var s = state.users;
+    await fetchGroups();
+    var filter = el("div", { class: "filter-bar" });
+    var sel = el("select", { name: "status" });
+    [["", "全部状态"], ["normal", "normal"], ["watched", "watched"], ["blacklist", "blacklist"], ["whitelist", "whitelist"]].forEach(function(opt){
+      var o = el("option", { value: opt[0], text: opt[1] });
+      if (s.status === opt[0]) o.selected = true;
+      sel.appendChild(o);
+    });
+    filter.appendChild(sel);
+    var inKw = makeInput("keyword", s.keyword, "关键字（QQ/昵称）");
+    filter.appendChild(inKw);
+    var inFf = makeDateInput("first_seen_from", s.first_seen_from);
+    var inFt = makeDateInput("first_seen_to", s.first_seen_to);
+    filter.appendChild(document.createTextNode(" 首现起"));
+    filter.appendChild(inFf);
+    filter.appendChild(document.createTextNode(" 止"));
+    filter.appendChild(inFt);
+    var inLf = makeDateInput("last_seen_from", s.last_seen_from);
+    var inLt = makeDateInput("last_seen_to", s.last_seen_to);
+    filter.appendChild(document.createTextNode(" 末现起"));
+    filter.appendChild(inLf);
+    filter.appendChild(document.createTextNode(" 止"));
+    filter.appendChild(inLt);
+    var grpSel = el("select", { multiple: "multiple", name: "groups", size: "3", style: "width:160px;" });
+    (groupsCache || []).forEach(function(g){
+      var o = el("option", { value: g.group_id, text: (g.group_name || g.group_id) + " (" + g.group_id + ")" });
+      if (s.groups.indexOf(g.group_id) !== -1) o.selected = true;
+      grpSel.appendChild(o);
+    });
+    filter.appendChild(el("label", { text: " 群多选", style: "font-size:12px;color:var(--text-2);" }));
+    filter.appendChild(grpSel);
+    filter.appendChild(makeButton("搜索", "btn-primary", function(){
+      s.status = sel.value;
+      s.keyword = inKw.value.trim();
+      s.first_seen_from = inFf.value;
+      s.first_seen_to = inFt.value;
+      s.last_seen_from = inLf.value;
+      s.last_seen_to = inLt.value;
+      s.groups = Array.prototype.slice.call(grpSel.selectedOptions).map(function(o){ return o.value; });
+      s.page = 1;
+      renderUsers();
+    }));
+
+    var toolbar = el("div", { class: "toolbar" });
+    var btnAdd = el("button", { class: "btn btn-primary", text: "+ 新增" });
+    btnAdd.addEventListener("click", openCreateUser);
+    toolbar.appendChild(btnAdd);
+    toolbar.appendChild(el("div", { class: "info", text: "共 " + s.total + " 条" }));
+
+    content.innerHTML = "";
+    content.appendChild(filter);
+    content.appendChild(toolbar);
+    var loading = el("div", { class: "loading-overlay", html: '<span class="spinner"></span> 加载中...' });
+    content.appendChild(loading);
+
+    try {
+      var data = await apiGet("users", {
+        page: s.page, page_size: s.page_size, keyword: s.keyword, status: s.status,
+        first_seen_from: s.first_seen_from || undefined, first_seen_to: s.first_seen_to || undefined,
+        last_seen_from: s.last_seen_from || undefined, last_seen_to: s.last_seen_to || undefined,
+        groups: s.groups.length ? s.groups.join(",") : undefined,
+        sort_by: s.sort_by || undefined, sort_dir: s.sort_dir || undefined
+      });
+      s.items = data.items || [];
+      s.total = data.total || 0;
+      content.removeChild(loading);
+
+      var wrap = el("div", { class: "table-wrap" });
+      var tbl = el("table");
+      var thead = el("thead");
+      var trh = el("tr");
+      var onSort = function(){ renderUsers(); };
+      trh.appendChild(makeSortTh("QQ号", "user_id", s, "users", onSort));
+      trh.appendChild(makeSortTh("昵称", "nickname", s, "users", onSort));
+      trh.appendChild(makeSortTh("状态", "status", s, "users", onSort));
+      trh.appendChild(makeSortTh("违规次数", "violation_count", s, "users", onSort));
+      trh.appendChild(makeSortTh("加群数", "group_count", s, "users", onSort));
+      trh.appendChild(makeSortTh("群", null, s, "users", onSort));
+      trh.appendChild(makeSortTh("首次出现", "first_seen_at", s, "users", onSort));
+      trh.appendChild(makeSortTh("最后出现", "last_seen_at", s, "users", onSort));
+      trh.appendChild(makeSortTh("备注", null, s, "users", onSort));
+      trh.appendChild(makeSortTh("操作", null, s, "users", onSort));
+      thead.appendChild(trh);
+      tbl.appendChild(thead);
+      var tbody = el("tbody");
+      if (s.items.length === 0) {
+        var trE = el("tr");
+        var tdE = el("td", { text: "暂无数据" });
+        tdE.setAttribute("colspan", 10);
+        tdE.style.textAlign = "center";
+        tdE.style.color = "var(--text-2)";
+        trE.appendChild(tdE);
+        tbody.appendChild(trE);
+      } else {
+        s.items.forEach(function(row){
+          var tr = el("tr");
+          var tdU = el("td", { text: row.user_id || "" }); tdU.setAttribute("data-label", "QQ号"); tr.appendChild(tdU);
+          var tdN = el("td", { text: row.nickname || "-" }); tdN.setAttribute("data-label", "昵称"); tr.appendChild(tdN);
+          var tdS = el("td"); tdS.setAttribute("data-label", "状态");
+          tdS.appendChild(el("span", {
+            class: "badge " + statusBadgeCls(row.status),
+            text: row.status || "normal"
+          }));
+          tr.appendChild(tdS);
+          var tdC = el("td", { text: String(row.violation_count || 0) }); tdC.setAttribute("data-label", "违规次数"); tr.appendChild(tdC);
+          var groups = row.group_ids;
+          if (typeof groups === "string") {
+            try { groups = JSON.parse(groups); } catch(e) { groups = []; }
+          }
+          if (!Array.isArray(groups)) groups = [];
+          var tdGc = el("td", { text: String(groups.length) }); tdGc.setAttribute("data-label", "加群数"); tr.appendChild(tdGc);
+          var tdG = el("td"); tdG.setAttribute("data-label", "群");
+          if (groups.length === 0) tdG.appendChild(document.createTextNode("-"));
+          else groups.forEach(function(gid){ tdG.appendChild(el("span", { class: "chip", text: gid })); });
+          tr.appendChild(tdG);
+          var tdF = el("td", { text: fmtTime(row.first_seen_at) }); tdF.setAttribute("data-label", "首次出现"); tr.appendChild(tdF);
+          var tdL = el("td", { text: fmtTime(row.last_seen_at) }); tdL.setAttribute("data-label", "最后出现"); tr.appendChild(tdL);
+          var tdNt = el("td", { text: row.note || "-" }); tdNt.setAttribute("data-label", "备注"); tr.appendChild(tdNt);
+          var tdOps = el("td"); tdOps.setAttribute("data-label", "操作");
+          var btnEdit = el("button", { class: "btn btn-sm", text: "改" });
+          btnEdit.addEventListener("click", function(){ openEditUser(row); });
+          var btnDel = el("button", { class: "btn btn-sm btn-danger", text: "删" });
+          btnDel.style.marginLeft = "4px";
+          btnDel.addEventListener("click", function(){
+            confirmDialog("确认删除用户档案 QQ:" + row.user_id + " ？", async function(){
+              try {
+                await apiDelete("users/" + encodeURIComponent(row.user_id));
+                toast("已删除", "success");
+                renderUsers();
+              } catch (e) { toast("删除失败: " + (e.message || e), "error"); }
+            });
+          });
+          tdOps.appendChild(btnEdit); tdOps.appendChild(btnDel);
+          tr.appendChild(tdOps);
+          tbody.appendChild(tr);
+        });
+      }
+      tbl.appendChild(tbody);
+      wrap.appendChild(tbl);
+      content.appendChild(wrap);
+      content.appendChild(buildPagination(s.page, s.page_size, s.total, function(p){ s.page = p; renderUsers(); }));
+    } catch (e) {
+      if (loading.parentNode) loading.parentNode.removeChild(loading);
+      content.appendChild(el("div", { class: "empty", text: "加载失败: " + (e.message || e) }));
+      toast("加载用户列表失败: " + (e.message || e), "error");
+    }
+  }
+
+  function statusBadgeCls(s) {
+    if (s === "blacklist") return "badge-danger";
+    if (s === "watched") return "badge-warn";
+    if (s === "whitelist") return "badge-success";
+    return "badge-muted";
+  }
+
+  function buildUserForm(row, editMode) {
+    var form = el("div");
+    if (!editMode) form.appendChild(makeFormRow("QQ号", "user_id", row.user_id || ""));
+    form.appendChild(makeFormRow("昵称", "nickname", row.nickname || ""));
+    var statusRow = el("div", { class: "form-row" });
+    statusRow.appendChild(el("label", { text: "状态" }));
+    var sel = el("select", { name: "status" });
+    ["normal", "watched", "blacklist", "whitelist"].forEach(function(opt){
+      var o = el("option", { value: opt, text: opt });
+      if ((row.status || "normal") === opt) o.selected = true;
+      sel.appendChild(o);
+    });
+    statusRow.appendChild(sel);
+    form.appendChild(statusRow);
+    var groups = row.group_ids;
+    if (typeof groups === "string") {
+      try { groups = JSON.parse(groups); } catch(e) { groups = []; }
+    }
+    if (!Array.isArray(groups)) groups = [];
+    form.appendChild(makeFormRow("所在群（逗号分隔）", "group_ids", groups.join(",")));
+    form.appendChild(makeFormRow("备注", "note", row.note || "", true));
+    return form;
+  }
+  function readUserForm(form) {
+    var body = {};
+    var uidInput = form.querySelector('[name="user_id"]');
+    if (uidInput) body.user_id = uidInput.value.trim();
+    body.nickname = form.querySelector('[name="nickname"]').value;
+    body.status = form.querySelector('[name="status"]').value;
+    var grpStr = form.querySelector('[name="group_ids"]').value;
+    body.group_ids = grpStr.split(",").map(function(x){ return x.trim(); }).filter(function(x){ return x; });
+    body.note = form.querySelector('[name="note"]').value;
+    return body;
+  }
+  function openCreateUser() {
+    var form = buildUserForm({ status: "normal" }, false);
+    showModal({
+      title: "新增用户档案",
+      content: form,
+      actions: [
+        { label: "取消", handler: closeModal },
+        { label: "保存", cls: "btn-primary", handler: async function(){
+          var body = readUserForm(form);
+          if (!body.user_id) { toast("请输入 QQ 号", "error"); return; }
+          try {
+            await apiPost("users", body);
+            toast("已添加", "success");
+            closeModal();
+            renderUsers();
+          } catch (e) { toast("添加失败: " + (e.message || e), "error"); }
+        }}
+      ]
+    });
+  }
+  function openEditUser(row) {
+    var form = buildUserForm(row, true);
+    showModal({
+      title: "编辑用户档案 " + row.user_id,
+      content: form,
+      actions: [
+        { label: "取消", handler: closeModal },
+        { label: "保存", cls: "btn-primary", handler: async function(){
+          var body = readUserForm(form);
+          delete body.user_id;
+          try {
+            await apiUpdate("users/" + encodeURIComponent(row.user_id), body);
+            toast("已保存", "success");
+            closeModal();
+            renderUsers();
+          } catch (e) { toast("保存失败: " + (e.message || e), "error"); }
+        }}
+      ]
+    });
+  }
+
+  async function init() {
+    bridge = window.AstrBotPluginPage;
+    if (!bridge) {
+      $("#content").innerHTML = '<div class="empty">Bridge SDK 未注入，请通过 AstrBot Dashboard 打开本页</div>';
+      return;
+    }
+    try { await bridge.ready(); } catch (e) { /* ignore */ }
+    loadSort("violations", state.violations);
+    loadSort("audits", state.audits);
+    loadSort("whitelist", state.whitelist);
+    loadSort("blacklist", state.blacklist);
+    loadSort("users", state.users);
+    bindTabs();
+    render();
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init);
+  } else {
+    init();
+  }
+})();
+</script>
+</body>
+</html>

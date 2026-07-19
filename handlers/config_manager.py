@@ -22,7 +22,40 @@ class ConfigManager:
         """
         self._config = config
         self._group_config: dict[str, dict] = {}
+        # group_settings 快照：maybe_reload() 与之比较以检测配置变更（v1.5.0）
+        self._group_settings_snapshot: list = self._copy_group_settings()
         self._load_group_config()
+
+    def _copy_group_settings(self) -> list:
+        """深拷贝 group_settings 段落作为变更检测快照"""
+        import copy
+
+        group_settings = self._config.get("group_settings", [])
+        if not isinstance(group_settings, list):
+            return []
+        try:
+            return copy.deepcopy(group_settings)
+        except Exception:
+            # deepcopy 失败时退化为浅拷贝（配置项均为基本类型，足够用于比较）
+            return [dict(s) for s in group_settings if isinstance(s, dict)]
+
+    def maybe_reload(self) -> bool:
+        """检测 group_settings 变更并热重载群配置（无需重启插件）
+
+        在每个管理群指令入口调用。配置在 Dashboard 保存后本字典被原地更新，
+        与快照比较发现差异即重建群配置缓存。
+
+        Returns:
+            是否发生了重载
+        """
+        current = self._config.get("group_settings", [])
+        if current != self._group_settings_snapshot:
+            self._group_settings_snapshot = self._copy_group_settings()
+            self._group_config.clear()
+            self._load_group_config()
+            logger.info("检测到 group_settings 变更，已自动重载群配置")
+            return True
+        return False
 
     def _load_group_config(self):
         """加载群聊配置"""
@@ -45,6 +78,12 @@ class ConfigManager:
             manage_group_id = str(setting.get("manage_group_id", ""))
 
             if group_id and manage_group_id:
+                # 重复 group_id 给出警告而非静默覆盖（v1.5.0）
+                if group_id in self._group_config:
+                    logger.warning(
+                        f"group_settings 中存在重复的 group_id={group_id}，"
+                        "后出现的条目将覆盖先前的配置"
+                    )
                 # 验证并规范化配置值，带异常处理
                 first_mute_duration = self._safe_int(
                     setting.get("first_mute_duration"), 600, min_val=0
@@ -72,6 +111,7 @@ class ConfigManager:
 
                 # 保存每个群的完整配置
                 self._group_config[group_id] = {
+                    "group_name": str(setting.get("group_name", "")),
                     "manage_group_id": manage_group_id,
                     "first_mute_duration": first_mute_duration,
                     "max_mute_duration": max_mute_duration,
@@ -228,6 +268,25 @@ class ConfigManager:
             if config.get("manage_group_id") == manage_group_id:
                 group_ids.append(group_id)
         return group_ids
+
+    def get_group_display_list(self) -> list[dict]:
+        """
+        返回所有已配置群的展示列表（供 WebUI 下拉框使用，v1.5.0）
+
+        Returns:
+            每项为 {"group_id", "group_name", "manage_group_id"}，
+            group_name 为群别名（可为空，前端回退展示群号）
+        """
+        result = []
+        for group_id, config in self._group_config.items():
+            result.append(
+                {
+                    "group_id": group_id,
+                    "group_name": config.get("group_name", ""),
+                    "manage_group_id": config.get("manage_group_id", ""),
+                }
+            )
+        return result
 
     def is_group_enabled(self, group_id: str) -> bool:
         """

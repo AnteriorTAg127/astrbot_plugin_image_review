@@ -5,10 +5,68 @@
 
 import hashlib
 import os
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from enum import Enum
 
 import aiosqlite
+
+# ========== WebUI 查询安全辅助（v1.5.0） ==========
+
+# 排序字段白名单 —— 防 SQL 注入，sort_by 必须在此映射中才生效
+_VIOLATION_SORT_FIELDS: dict[str, str] = {
+    "id": "id",
+    "violation_time": "violation_time",
+    "group_id": "group_id",
+    "user_id": "user_id",
+    "risk_level": "risk_level",
+}
+_AUDIT_SORT_FIELDS: dict[str, str] = {
+    "id": "id",
+    "created_at": "created_at",
+    "group_id": "group_id",
+    "user_id": "user_id",
+    "risk_level": "risk_level",
+}
+_LIST_SORT_FIELDS: dict[str, str] = {
+    "id": "id",
+    "md5_hash": "md5_hash",
+    "created_at": "created_at",
+    "group_id": "group_id",
+}
+_USER_PROFILE_SORT_FIELDS: dict[str, str] = {
+    "user_id": "user_id",
+    "nickname": "nickname",
+    "status": "status",
+    "violation_count": "violation_count",
+    "first_seen_at": "first_seen_at",
+    "last_seen_at": "last_seen_at",
+}
+
+
+def _build_order_clause(
+    sort_by: str | None,
+    sort_dir: str | None,
+    allowlist: dict[str, str],
+    default_clause: str,
+    tiebreaker: str,
+) -> str:
+    """构造安全的 ORDER BY 子句。
+
+    sort_by 必须在 allowlist 中，否则使用 default_clause。
+    无论显式排序还是默认排序，均追加固定次级键（tiebreaker ASC）保证分页稳定。
+    """
+    direction = "ASC" if (sort_dir or "").lower() == "asc" else "DESC"
+    col = allowlist.get(sort_by or "")
+    if col is None:
+        return f"{default_clause}, {tiebreaker} ASC"
+    if col == tiebreaker:
+        return f"ORDER BY {col} {direction}"
+    return f"ORDER BY {col} {direction}, {tiebreaker} ASC"
+
+
+def _escape_like(keyword: str) -> str:
+    """转义 LIKE 模式中的 ``\\``、``%``、``_``，配合 ``ESCAPE '\\'`` 使用。"""
+    return keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 class RiskLevel(Enum):
@@ -21,6 +79,7 @@ class RiskLevel(Enum):
 
 class DatabaseManager:
     """数据库管理器"""
+
     HASH_VERSION = 2
 
     def __init__(self, data_dir: str):
@@ -157,10 +216,44 @@ class DatabaseManager:
                 )  # 默认值 2 对应 self.HASH_VERSION，此处需要 SQL 字面量
                 # 旧版 phash 数据（v1.3.7）不可信，清理
                 await cursor.execute("DELETE FROM image_hashes")
-                logger.debug("检测到旧版 image_hashes 表，已添加 hash_version 列并清理旧数据")
+                logger.debug(
+                    "检测到旧版 image_hashes 表，已添加 hash_version 列并清理旧数据"
+                )
             except aiosqlite.OperationalError:
                 # 列已存在，无需迁移
                 pass
+
+            # 审核日志表（v1.5.0 新增：记录每张图片的审核结果，供 WebUI 统计与浏览）
+            logger.debug("创建审核日志表")
+            await cursor.execute("""
+                CREATE TABLE IF NOT EXISTS audit_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    group_id TEXT,
+                    user_id TEXT,
+                    user_name TEXT,
+                    md5_hash TEXT,
+                    risk_level INTEGER,
+                    risk_reason TEXT,
+                    source TEXT,
+                    created_at TEXT
+                )
+            """)
+
+            # 用户违规档案表（v1.5.0 新增：跨群用户档案，含状态/备注/首末次出现）
+            logger.debug("创建用户违规档案表")
+            await cursor.execute("""
+                CREATE TABLE IF NOT EXISTS user_profiles (
+                    user_id TEXT PRIMARY KEY,
+                    nickname TEXT DEFAULT '',
+                    group_ids TEXT DEFAULT '[]',
+                    note TEXT DEFAULT '',
+                    status TEXT DEFAULT 'normal',
+                    violation_count INTEGER DEFAULT 0,
+                    first_seen_at TEXT,
+                    last_seen_at TEXT,
+                    updated_at TEXT
+                )
+            """)
 
             # 创建索引
             logger.debug("创建索引")
@@ -185,10 +278,119 @@ class DatabaseManager:
             await cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_image_hashes_dhash ON image_hashes(dhash)
             """)
+            await cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_audit_log_group ON audit_log(group_id)
+            """)
+            await cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log(created_at)
+            """)
+            await cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_user_profiles_status ON user_profiles(status)
+            """)
+            await cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_user_profiles_vcount
+                ON user_profiles(violation_count)
+            """)
 
             await conn.commit()
             logger.debug("数据库表结构初始化完成")
         self._initialized = True
+
+        # v1.5.0 幂等迁移（独立连接）：名单表群级化 + 违规记录新列
+        await self._migrate_v150()
+
+    async def _migrate_v150(self):
+        """v1.5.0 数据库迁移（幂等）
+
+        1. violation_records 增加 user_name / evidence_path / note 列
+        2. manual_whitelist / manual_blacklist 增加 group_id 列，
+           唯一约束由 md5_hash 改为 (md5_hash, group_id)（重建表迁移，
+           参照 astrbot_plugin_content_audit 的 _migrate_whitelist_per_group）
+        """
+        import logging
+
+        logger = logging.getLogger(__name__)
+
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+
+            # 1. violation_records 新列（ALTER 不支持复合操作，逐项尝试）
+            for column, type_def in (
+                ("user_name", "TEXT DEFAULT ''"),
+                ("evidence_path", "TEXT"),
+                ("note", "TEXT DEFAULT ''"),
+            ):
+                try:
+                    await cursor.execute(
+                        f"ALTER TABLE violation_records ADD COLUMN {column} {type_def}"
+                    )
+                    logger.debug(f"violation_records 迁移: 新增列 {column}")
+                except aiosqlite.OperationalError:
+                    pass  # 列已存在
+
+            # 2. 人工名单表群级化重建
+            await self._rebuild_manual_list_with_group(cursor, "manual_whitelist")
+            await self._rebuild_manual_list_with_group(cursor, "manual_blacklist")
+
+            await conn.commit()
+
+    async def _rebuild_manual_list_with_group(self, cursor, table: str):
+        """为人工名单表增加 group_id 并重建唯一约束（幂等）。
+
+        旧表: md5_hash UNIQUE；新表: UNIQUE(md5_hash, group_id)，
+        group_id='' 表示全局条目。旧数据一律迁移为全局条目。
+        """
+        import logging
+
+        logger = logging.getLogger(__name__)
+
+        await cursor.execute(f"PRAGMA table_info({table})")
+        cols = {row[1] for row in await cursor.fetchall()}
+        if "group_id" in cols:
+            return  # 已迁移
+
+        if table == "manual_whitelist":
+            create_sql = f"""
+                CREATE TABLE {table}_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    md5_hash TEXT NOT NULL,
+                    group_id TEXT NOT NULL DEFAULT '',
+                    added_by TEXT,
+                    reason TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(md5_hash, group_id)
+                )
+            """
+            insert_sql = f"""
+                INSERT INTO {table}_new (md5_hash, group_id, added_by, reason, created_at)
+                SELECT md5_hash, '', added_by, reason, created_at FROM {table}
+            """
+        else:  # manual_blacklist
+            create_sql = f"""
+                CREATE TABLE {table}_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    md5_hash TEXT NOT NULL,
+                    group_id TEXT NOT NULL DEFAULT '',
+                    risk_level INTEGER NOT NULL,
+                    risk_reason TEXT,
+                    added_by TEXT,
+                    reason TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(md5_hash, group_id)
+                )
+            """
+            insert_sql = f"""
+                INSERT INTO {table}_new
+                    (md5_hash, group_id, risk_level, risk_reason, added_by, reason, created_at)
+                SELECT md5_hash, '', risk_level, risk_reason, added_by, reason, created_at
+                FROM {table}
+            """
+
+        await cursor.execute(create_sql)
+        await cursor.execute(insert_sql)
+        await cursor.execute(f"DROP TABLE {table}")
+        await cursor.execute(f"ALTER TABLE {table}_new RENAME TO {table}")
+        logger.debug(f"{table} 迁移: 增加 group_id 列（群级名单），旧数据作为全局条目")
 
     @staticmethod
     def calculate_md5(data: bytes) -> str:
@@ -506,6 +708,8 @@ class DatabaseManager:
         risk_reason: str,
         mute_duration: int | None = None,
         message_id: str | None = None,
+        user_name: str = "",
+        evidence_path: str | None = None,
     ):
         """
         记录违规信息
@@ -519,6 +723,8 @@ class DatabaseManager:
             risk_reason: 风险原因
             mute_duration: 禁言时长（秒）
             message_id: 消息ID
+            user_name: 用户名（v1.5.0，WebUI 展示用）
+            evidence_path: 证据图片本地路径（v1.5.0，WebUI 展示用）
         """
         import logging
 
@@ -535,8 +741,9 @@ class DatabaseManager:
             logger.debug("插入违规记录到数据库")
             await cursor.execute(
                 """INSERT INTO violation_records
-                   (user_id, group_id, md5_hash, image_url, risk_level, risk_reason, mute_duration, message_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (user_id, group_id, md5_hash, image_url, risk_level, risk_reason,
+                    mute_duration, message_id, user_name, evidence_path)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     user_id,
                     group_id,
@@ -546,6 +753,8 @@ class DatabaseManager:
                     risk_reason,
                     mute_duration,
                     message_id,
+                    user_name,
+                    evidence_path,
                 ),
             )
             logger.debug("违规记录插入完成")
@@ -565,6 +774,13 @@ class DatabaseManager:
 
             await conn.commit()
             logger.debug("违规信息记录完成")
+
+        # 更新用户违规档案（v1.5.0）：upsert + 全局违规计数 +1
+        try:
+            await self.upsert_user_profile(user_id, user_name, group_id)
+            await self.inc_user_violation_count(user_id)
+        except Exception as e:
+            logger.error(f"更新用户违规档案失败: {e}")
 
     async def get_user_violation_count(self, user_id: str, group_id: str) -> int:
         """
@@ -879,52 +1095,73 @@ class DatabaseManager:
             )
             await conn.commit()
 
-    # ========== 人工白名单管理 ==========
+    # ========== 人工白名单管理（v1.5.0 群级化） ==========
 
-    async def check_manual_whitelist(self, md5_hash: str) -> bool:
-        """检查MD5是否在人工白名单中"""
+    async def check_manual_whitelist(self, md5_hash: str, group_id: str = "") -> bool:
+        """检查MD5是否在人工白名单中（全局条目或指定群条目命中即放行）"""
         await self._init_db()
 
         async with aiosqlite.connect(self._db_path) as conn:
             cursor = await conn.cursor()
             await cursor.execute(
-                "SELECT id FROM manual_whitelist WHERE md5_hash = ?", (md5_hash,)
+                """SELECT 1 FROM manual_whitelist
+                   WHERE md5_hash = ? AND (group_id = '' OR group_id = ?) LIMIT 1""",
+                (md5_hash, group_id),
             )
             result = await cursor.fetchone()
             return result is not None
 
     async def add_manual_whitelist(
-        self, md5_hash: str, added_by: str = None, reason: str = None
+        self,
+        md5_hash: str,
+        added_by: str = None,
+        reason: str = None,
+        group_id: str = "",
     ) -> bool:
-        """添加到人工白名单"""
+        """添加到人工白名单（group_id='' 表示全局）"""
         await self._init_db()
 
         async with aiosqlite.connect(self._db_path) as conn:
             cursor = await conn.cursor()
             try:
                 await cursor.execute(
-                    "INSERT INTO manual_whitelist (md5_hash, added_by, reason) VALUES (?, ?, ?)",
-                    (md5_hash, added_by, reason),
+                    """INSERT INTO manual_whitelist (md5_hash, group_id, added_by, reason)
+                       VALUES (?, ?, ?, ?)""",
+                    (md5_hash, group_id or "", added_by, reason),
                 )
                 await conn.commit()
                 return True
             except aiosqlite.IntegrityError:
                 return False
 
-    async def remove_manual_whitelist(self, md5_hash: str) -> bool:
-        """从人工白名单移除"""
+    async def remove_manual_whitelist(
+        self, md5_hash: str, group_id: str | None = None
+    ) -> bool:
+        """从人工白名单移除
+
+        Args:
+            md5_hash: 图片MD5
+            group_id: None=移除该MD5的全部范围条目（向后兼容旧行为）；
+                      ''=仅移除全局条目；具体群号=仅移除该群条目
+        """
         await self._init_db()
 
         async with aiosqlite.connect(self._db_path) as conn:
             cursor = await conn.cursor()
-            await cursor.execute(
-                "DELETE FROM manual_whitelist WHERE md5_hash = ?", (md5_hash,)
-            )
+            if group_id is None:
+                await cursor.execute(
+                    "DELETE FROM manual_whitelist WHERE md5_hash = ?", (md5_hash,)
+                )
+            else:
+                await cursor.execute(
+                    "DELETE FROM manual_whitelist WHERE md5_hash = ? AND group_id = ?",
+                    (md5_hash, group_id),
+                )
             await conn.commit()
             return cursor.rowcount > 0
 
     async def clear_all_manual_whitelist(self) -> int:
-        """清空人工白名单"""
+        """清空人工白名单（全部范围）"""
         await self._init_db()
 
         async with aiosqlite.connect(self._db_path) as conn:
@@ -949,19 +1186,21 @@ class DatabaseManager:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
-    # ========== 人工黑名单管理 ==========
+    # ========== 人工黑名单管理（v1.5.0 群级化） ==========
 
     async def check_manual_blacklist(
-        self, md5_hash: str
+        self, md5_hash: str, group_id: str = ""
     ) -> tuple[RiskLevel, str] | None:
-        """检查MD5是否在人工黑名单中"""
+        """检查MD5是否在人工黑名单中（全局条目或指定群条目命中即拦截，群级条目优先）"""
         await self._init_db()
 
         async with aiosqlite.connect(self._db_path) as conn:
             cursor = await conn.cursor()
             await cursor.execute(
-                "SELECT risk_level, risk_reason FROM manual_blacklist WHERE md5_hash = ?",
-                (md5_hash,),
+                """SELECT risk_level, risk_reason FROM manual_blacklist
+                   WHERE md5_hash = ? AND (group_id = '' OR group_id = ?)
+                   ORDER BY group_id DESC LIMIT 1""",
+                (md5_hash, group_id),
             )
             result = await cursor.fetchone()
             if result:
@@ -975,8 +1214,9 @@ class DatabaseManager:
         risk_reason: str,
         added_by: str = None,
         reason: str = None,
+        group_id: str = "",
     ) -> bool:
-        """添加到人工黑名单"""
+        """添加到人工黑名单（group_id='' 表示全局）"""
         await self._init_db()
 
         async with aiosqlite.connect(self._db_path) as conn:
@@ -984,29 +1224,44 @@ class DatabaseManager:
             try:
                 await cursor.execute(
                     """INSERT INTO manual_blacklist
-                       (md5_hash, risk_level, risk_reason, added_by, reason)
-                       VALUES (?, ?, ?, ?, ?)""",
-                    (md5_hash, risk_level.value, risk_reason, added_by, reason),
+                       (md5_hash, group_id, risk_level, risk_reason, added_by, reason)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (
+                        md5_hash,
+                        group_id or "",
+                        risk_level.value,
+                        risk_reason,
+                        added_by,
+                        reason,
+                    ),
                 )
                 await conn.commit()
                 return True
             except aiosqlite.IntegrityError:
                 return False
 
-    async def remove_manual_blacklist(self, md5_hash: str) -> bool:
-        """从人工黑名单移除"""
+    async def remove_manual_blacklist(
+        self, md5_hash: str, group_id: str | None = None
+    ) -> bool:
+        """从人工黑名单移除（group_id 语义同 remove_manual_whitelist）"""
         await self._init_db()
 
         async with aiosqlite.connect(self._db_path) as conn:
             cursor = await conn.cursor()
-            await cursor.execute(
-                "DELETE FROM manual_blacklist WHERE md5_hash = ?", (md5_hash,)
-            )
+            if group_id is None:
+                await cursor.execute(
+                    "DELETE FROM manual_blacklist WHERE md5_hash = ?", (md5_hash,)
+                )
+            else:
+                await cursor.execute(
+                    "DELETE FROM manual_blacklist WHERE md5_hash = ? AND group_id = ?",
+                    (md5_hash, group_id),
+                )
             await conn.commit()
             return cursor.rowcount > 0
 
     async def clear_all_manual_blacklist(self) -> int:
-        """清空人工黑名单"""
+        """清空人工黑名单（全部范围）"""
         await self._init_db()
 
         async with aiosqlite.connect(self._db_path) as conn:
@@ -1030,6 +1285,32 @@ class DatabaseManager:
             )
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
+
+    async def get_manual_whitelist_entries(self, md5_hash: str) -> list[dict]:
+        """获取某 MD5 在人工白名单中的全部范围条目（全局 + 各群，v1.5.0）"""
+        await self._init_db()
+
+        async with aiosqlite.connect(self._db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.cursor()
+            await cursor.execute(
+                "SELECT * FROM manual_whitelist WHERE md5_hash = ? ORDER BY group_id",
+                (md5_hash,),
+            )
+            return [dict(row) for row in await cursor.fetchall()]
+
+    async def get_manual_blacklist_entries(self, md5_hash: str) -> list[dict]:
+        """获取某 MD5 在人工黑名单中的全部范围条目（全局 + 各群，v1.5.0）"""
+        await self._init_db()
+
+        async with aiosqlite.connect(self._db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.cursor()
+            await cursor.execute(
+                "SELECT * FROM manual_blacklist WHERE md5_hash = ? ORDER BY group_id",
+                (md5_hash,),
+            )
+            return [dict(row) for row in await cursor.fetchall()]
 
     # ========== 自动黑白名单管理 ==========
 
@@ -1071,3 +1352,920 @@ class DatabaseManager:
             blacklist_count = (await cursor.fetchone())[0]
 
             return {"whitelist": whitelist_count, "blacklist": blacklist_count}
+
+    # ========== 审核日志（v1.5.0 新增，供 WebUI 统计与浏览） ==========
+
+    async def record_audit(
+        self,
+        group_id: str,
+        user_id: str,
+        user_name: str,
+        md5_hash: str | None,
+        risk_level: RiskLevel,
+        risk_reason: str,
+        source: str = "",
+    ):
+        """记录一次图片审核结果（无论通过与否），并更新用户档案活跃时间
+
+        Args:
+            group_id: 群ID
+            user_id: 用户ID
+            user_name: 用户名
+            md5_hash: 图片MD5
+            risk_level: 风险等级
+            risk_reason: 风险原因（LLM 分析结论）
+            source: 审核来源（如 Aliyun / VLAI / cache）
+        """
+        import logging
+
+        logger = logging.getLogger(__name__)
+        try:
+            await self._init_db()
+            async with aiosqlite.connect(self._db_path) as conn:
+                cursor = await conn.cursor()
+                await cursor.execute(
+                    """INSERT INTO audit_log
+                       (group_id, user_id, user_name, md5_hash, risk_level, risk_reason, source, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        group_id,
+                        user_id,
+                        user_name,
+                        md5_hash,
+                        risk_level.value,
+                        risk_reason,
+                        source,
+                        datetime.now().isoformat(),
+                    ),
+                )
+                await conn.commit()
+        except Exception as e:
+            logger.error(f"记录审核日志失败: {e}")
+
+        # 更新用户档案（首末次出现、昵称、所在群），不影响主流程
+        try:
+            await self.upsert_user_profile(user_id, user_name, group_id)
+        except Exception as e:
+            logger.error(f"更新用户档案失败: {e}")
+
+    async def cleanup_audit_log(self, keep_days: int = 30) -> int:
+        """清理超过保留天数的审核日志"""
+        import logging
+
+        logger = logging.getLogger(__name__)
+        await self._init_db()
+        try:
+            cutoff = (datetime.now() - timedelta(days=keep_days)).isoformat()
+            async with aiosqlite.connect(self._db_path) as conn:
+                cursor = await conn.cursor()
+                await cursor.execute(
+                    "DELETE FROM audit_log WHERE created_at < ?", (cutoff,)
+                )
+                await conn.commit()
+                return cursor.rowcount
+        except Exception as e:
+            logger.error(f"清理审核日志失败: {e}")
+            return 0
+
+    # ========== 用户违规档案（v1.5.0 新增） ==========
+
+    async def upsert_user_profile(
+        self, user_id: str, nickname: str, group_id: str
+    ) -> None:
+        """Upsert 用户档案：首次出现建档，之后更新昵称/末次出现/所在群列表。
+
+        不触碰 violation_count（由 inc_user_violation_count 维护）。
+        """
+        import json
+
+        await self._init_db()
+        now_iso = datetime.now().isoformat()
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute(
+                "SELECT group_ids FROM user_profiles WHERE user_id = ?", (user_id,)
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                group_ids_json = json.dumps([group_id], ensure_ascii=False)
+                await cursor.execute(
+                    """INSERT INTO user_profiles
+                       (user_id, nickname, group_ids, note, status,
+                        violation_count, first_seen_at, last_seen_at, updated_at)
+                       VALUES (?, ?, ?, '', 'normal', 0, ?, ?, ?)""",
+                    (user_id, nickname, group_ids_json, now_iso, now_iso, now_iso),
+                )
+            else:
+                try:
+                    group_ids = json.loads(row[0] or "[]")
+                    if not isinstance(group_ids, list):
+                        group_ids = []
+                except (ValueError, TypeError):
+                    group_ids = []
+                if group_id and group_id not in group_ids:
+                    group_ids.append(group_id)
+                group_ids_json = json.dumps(group_ids, ensure_ascii=False)
+                await cursor.execute(
+                    """UPDATE user_profiles
+                       SET nickname = ?, group_ids = ?, last_seen_at = ?, updated_at = ?
+                       WHERE user_id = ?""",
+                    (nickname, group_ids_json, now_iso, now_iso, user_id),
+                )
+            await conn.commit()
+
+    async def inc_user_violation_count(self, user_id: str) -> None:
+        """用户档案全局违规计数 +1"""
+        await self._init_db()
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute(
+                """UPDATE user_profiles
+                   SET violation_count = violation_count + 1, updated_at = ?
+                   WHERE user_id = ?""",
+                (datetime.now().isoformat(), user_id),
+            )
+            await conn.commit()
+
+    async def _recalc_user_stats(self, cursor, user_id: str) -> None:
+        """重算用户的群级统计与档案全局违规计数（删除违规记录后调用，不提交）"""
+        await cursor.execute(
+            """UPDATE user_violation_stats SET violation_count = (
+                   SELECT COUNT(*) FROM violation_records
+                   WHERE violation_records.user_id = user_violation_stats.user_id
+                     AND violation_records.group_id = user_violation_stats.group_id
+               ) WHERE user_id = ?""",
+            (user_id,),
+        )
+        await cursor.execute(
+            """UPDATE user_profiles SET violation_count = (
+                   SELECT COUNT(*) FROM violation_records WHERE user_id = ?
+               ), updated_at = ? WHERE user_id = ?""",
+            (user_id, datetime.now().isoformat(), user_id),
+        )
+
+    # ========== WebUI：违规记录查询与 CRUD ==========
+
+    async def list_violations(
+        self,
+        page: int = 1,
+        page_size: int = 20,
+        group_id: str | None = None,
+        user_id: str | None = None,
+        keyword: str | None = None,
+        risk_level: int | None = None,
+        sort_by: str | None = None,
+        sort_dir: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> tuple[list[dict], int]:
+        """分页查询违规记录；keyword 模糊匹配 user_name / risk_reason"""
+        import logging
+
+        logger = logging.getLogger(__name__)
+        await self._init_db()
+        page = max(1, page)
+        page_size = max(1, min(page_size, 100))
+
+        clauses: list[str] = []
+        params: list = []
+        if group_id:
+            clauses.append("group_id = ?")
+            params.append(group_id)
+        if user_id:
+            clauses.append("user_id = ?")
+            params.append(user_id)
+        if risk_level is not None:
+            clauses.append("risk_level = ?")
+            params.append(risk_level)
+        if keyword:
+            escaped = _escape_like(keyword)
+            clauses.append(
+                "(COALESCE(user_name, '') LIKE ? ESCAPE '\\' "
+                "OR COALESCE(risk_reason, '') LIKE ? ESCAPE '\\')"
+            )
+            like = f"%{escaped}%"
+            params.extend([like, like])
+        if date_from:
+            clauses.append("date(violation_time) >= date(?)")
+            params.append(date_from)
+        if date_to:
+            clauses.append("date(violation_time) <= date(?)")
+            params.append(date_to)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        order_clause = _build_order_clause(
+            sort_by,
+            sort_dir,
+            _VIOLATION_SORT_FIELDS,
+            "ORDER BY violation_time DESC",
+            "id",
+        )
+        try:
+            async with aiosqlite.connect(self._db_path) as conn:
+                conn.row_factory = aiosqlite.Row
+                cursor = await conn.cursor()
+                total = (
+                    await (
+                        await cursor.execute(
+                            f"SELECT COUNT(*) FROM violation_records {where}", params
+                        )
+                    ).fetchone()
+                )[0]
+                await cursor.execute(
+                    f"SELECT * FROM violation_records {where} {order_clause} LIMIT ? OFFSET ?",
+                    [*params, page_size, (page - 1) * page_size],
+                )
+                rows = [dict(r) for r in await cursor.fetchall()]
+                return rows, total
+        except Exception as e:
+            logger.error(f"list_violations 失败: {e}")
+            return [], 0
+
+    async def get_violation(self, vid: int) -> dict | None:
+        """按 ID 获取单条违规记录"""
+        await self._init_db()
+        async with aiosqlite.connect(self._db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.cursor()
+            await cursor.execute("SELECT * FROM violation_records WHERE id = ?", (vid,))
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def update_violation(self, vid: int, fields: dict) -> bool:
+        """编辑违规记录（仅允许 user_name / note）"""
+        import logging
+
+        logger = logging.getLogger(__name__)
+        allowed = {"user_name", "note"}
+        filtered = {k: v for k, v in fields.items() if k in allowed}
+        if not filtered:
+            return False
+        await self._init_db()
+        try:
+            async with aiosqlite.connect(self._db_path) as conn:
+                cursor = await conn.cursor()
+                set_clause = ", ".join(f"{k} = ?" for k in filtered)
+                values = list(filtered.values())
+                values.append(vid)
+                await cursor.execute(
+                    f"UPDATE violation_records SET {set_clause} WHERE id = ?", values
+                )
+                await conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"update_violation({vid}) 失败: {e}")
+            return False
+
+    async def delete_violation(self, vid: int) -> bool:
+        """删除单条违规记录并重算用户统计与档案计数"""
+        import logging
+
+        logger = logging.getLogger(__name__)
+        await self._init_db()
+        try:
+            async with aiosqlite.connect(self._db_path) as conn:
+                cursor = await conn.cursor()
+                await cursor.execute(
+                    "SELECT user_id FROM violation_records WHERE id = ?", (vid,)
+                )
+                row = await cursor.fetchone()
+                if not row:
+                    return False
+                user_id = row[0]
+                await cursor.execute(
+                    "DELETE FROM violation_records WHERE id = ?", (vid,)
+                )
+                deleted = cursor.rowcount > 0
+                await self._recalc_user_stats(cursor, user_id)
+                await conn.commit()
+                return deleted
+        except Exception as e:
+            logger.error(f"delete_violation({vid}) 失败: {e}")
+            return False
+
+    async def delete_violations_batch(self, ids: list[int]) -> int:
+        """批量删除违规记录，重算受影响用户的统计"""
+        import logging
+
+        logger = logging.getLogger(__name__)
+        if not ids:
+            return 0
+        await self._init_db()
+        try:
+            async with aiosqlite.connect(self._db_path) as conn:
+                cursor = await conn.cursor()
+                placeholders = ",".join("?" for _ in ids)
+                await cursor.execute(
+                    f"SELECT DISTINCT user_id FROM violation_records WHERE id IN ({placeholders})",
+                    ids,
+                )
+                affected_users = [r[0] for r in await cursor.fetchall()]
+                await cursor.execute(
+                    f"DELETE FROM violation_records WHERE id IN ({placeholders})", ids
+                )
+                deleted = cursor.rowcount
+                for uid in affected_users:
+                    await self._recalc_user_stats(cursor, uid)
+                await conn.commit()
+                return deleted
+        except Exception as e:
+            logger.error(f"delete_violations_batch 失败: {e}")
+            return 0
+
+    async def get_violation_evidence_path(self, vid: int) -> str | None:
+        """获取违规记录的证据图片路径（WebUI 图片服务用）"""
+        record = await self.get_violation(vid)
+        if not record:
+            return None
+        path = record.get("evidence_path")
+        return path if path else None
+
+    # ========== WebUI：审核日志查询与删除 ==========
+
+    async def list_audits(
+        self,
+        page: int = 1,
+        page_size: int = 20,
+        group_id: str | None = None,
+        risk_level: int | None = None,
+        keyword: str | None = None,
+        sort_by: str | None = None,
+        sort_dir: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> tuple[list[dict], int]:
+        """分页查询审核日志"""
+        import logging
+
+        logger = logging.getLogger(__name__)
+        await self._init_db()
+        page = max(1, page)
+        page_size = max(1, min(page_size, 100))
+
+        clauses: list[str] = []
+        params: list = []
+        if group_id:
+            clauses.append("group_id = ?")
+            params.append(group_id)
+        if risk_level is not None:
+            clauses.append("risk_level = ?")
+            params.append(risk_level)
+        if keyword:
+            escaped = _escape_like(keyword)
+            clauses.append(
+                "(COALESCE(user_name, '') LIKE ? ESCAPE '\\' "
+                "OR COALESCE(risk_reason, '') LIKE ? ESCAPE '\\')"
+            )
+            like = f"%{escaped}%"
+            params.extend([like, like])
+        if date_from:
+            clauses.append("date(created_at) >= date(?)")
+            params.append(date_from)
+        if date_to:
+            clauses.append("date(created_at) <= date(?)")
+            params.append(date_to)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        order_clause = _build_order_clause(
+            sort_by, sort_dir, _AUDIT_SORT_FIELDS, "ORDER BY created_at DESC", "id"
+        )
+        try:
+            async with aiosqlite.connect(self._db_path) as conn:
+                conn.row_factory = aiosqlite.Row
+                cursor = await conn.cursor()
+                total = (
+                    await (
+                        await cursor.execute(
+                            f"SELECT COUNT(*) FROM audit_log {where}", params
+                        )
+                    ).fetchone()
+                )[0]
+                await cursor.execute(
+                    f"SELECT * FROM audit_log {where} {order_clause} LIMIT ? OFFSET ?",
+                    [*params, page_size, (page - 1) * page_size],
+                )
+                rows = [dict(r) for r in await cursor.fetchall()]
+                return rows, total
+        except Exception as e:
+            logger.error(f"list_audits 失败: {e}")
+            return [], 0
+
+    async def get_audit(self, aid: int) -> dict | None:
+        """按 ID 获取单条审核日志"""
+        await self._init_db()
+        async with aiosqlite.connect(self._db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.cursor()
+            await cursor.execute("SELECT * FROM audit_log WHERE id = ?", (aid,))
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def delete_audit(self, aid: int) -> bool:
+        """删除单条审核日志"""
+        await self._init_db()
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute("DELETE FROM audit_log WHERE id = ?", (aid,))
+            await conn.commit()
+            return cursor.rowcount > 0
+
+    async def delete_audits_batch(self, ids: list[int]) -> int:
+        """批量删除审核日志"""
+        if not ids:
+            return 0
+        await self._init_db()
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+            placeholders = ",".join("?" for _ in ids)
+            await cursor.execute(
+                f"DELETE FROM audit_log WHERE id IN ({placeholders})", ids
+            )
+            await conn.commit()
+            return cursor.rowcount
+
+    # ========== WebUI：人工名单详细 CRUD ==========
+
+    async def list_manual_whitelist_detailed(
+        self,
+        group_id_filter: str | None = None,
+        sort_by: str | None = None,
+        sort_dir: str | None = None,
+    ) -> list[dict]:
+        """人工白名单列表。group_id_filter: None=全部, 'global'=仅全局, 具体群号=该群"""
+        await self._init_db()
+        clauses: list[str] = []
+        params: list = []
+        if group_id_filter is not None:
+            if group_id_filter == "global":
+                clauses.append("group_id = ''")
+            else:
+                clauses.append("group_id = ?")
+                params.append(group_id_filter)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        order_clause = _build_order_clause(
+            sort_by, sort_dir, _LIST_SORT_FIELDS, "ORDER BY created_at DESC", "id"
+        )
+        async with aiosqlite.connect(self._db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.cursor()
+            await cursor.execute(
+                f"SELECT * FROM manual_whitelist {where} {order_clause}", params
+            )
+            return [dict(r) for r in await cursor.fetchall()]
+
+    async def update_manual_list_reason(
+        self, table: str, row_id: int, reason: str
+    ) -> bool:
+        """更新人工名单条目的备注（table 仅限 manual_whitelist / manual_blacklist）"""
+        if table not in ("manual_whitelist", "manual_blacklist"):
+            return False
+        await self._init_db()
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute(
+                f"UPDATE {table} SET reason = ? WHERE id = ?", (reason, row_id)
+            )
+            await conn.commit()
+            return cursor.rowcount > 0
+
+    async def delete_manual_list_by_id(self, table: str, row_id: int) -> bool:
+        """按 ID 删除人工名单条目（table 仅限 manual_whitelist / manual_blacklist）"""
+        if table not in ("manual_whitelist", "manual_blacklist"):
+            return False
+        await self._init_db()
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute(f"DELETE FROM {table} WHERE id = ?", (row_id,))
+            await conn.commit()
+            return cursor.rowcount > 0
+
+    async def list_manual_blacklist_detailed(
+        self,
+        group_id_filter: str | None = None,
+        sort_by: str | None = None,
+        sort_dir: str | None = None,
+    ) -> list[dict]:
+        """人工黑名单列表。group_id_filter 语义同白名单"""
+        await self._init_db()
+        clauses: list[str] = []
+        params: list = []
+        if group_id_filter is not None:
+            if group_id_filter == "global":
+                clauses.append("group_id = ''")
+            else:
+                clauses.append("group_id = ?")
+                params.append(group_id_filter)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        order_clause = _build_order_clause(
+            sort_by, sort_dir, _LIST_SORT_FIELDS, "ORDER BY created_at DESC", "id"
+        )
+        async with aiosqlite.connect(self._db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.cursor()
+            await cursor.execute(
+                f"SELECT * FROM manual_blacklist {where} {order_clause}", params
+            )
+            return [dict(r) for r in await cursor.fetchall()]
+
+    # ========== WebUI：用户档案 CRUD ==========
+
+    async def list_user_profiles(
+        self,
+        page: int = 1,
+        page_size: int = 20,
+        keyword: str | None = None,
+        status: str | None = None,
+        sort_by: str | None = None,
+        sort_dir: str | None = None,
+        first_seen_from: str | None = None,
+        first_seen_to: str | None = None,
+        last_seen_from: str | None = None,
+        last_seen_to: str | None = None,
+        groups: list[str] | str | None = None,
+    ) -> tuple[list[dict], int]:
+        """分页查询用户档案；keyword 模糊匹配 user_id / nickname / note"""
+        import logging
+
+        logger = logging.getLogger(__name__)
+        await self._init_db()
+        page = max(1, page)
+        page_size = max(1, min(page_size, 100))
+
+        clauses: list[str] = []
+        params: list = []
+        if keyword:
+            escaped = _escape_like(keyword)
+            clauses.append(
+                "(user_id LIKE ? ESCAPE '\\' OR COALESCE(nickname, '') LIKE ? ESCAPE '\\' "
+                "OR COALESCE(note, '') LIKE ? ESCAPE '\\')"
+            )
+            like = f"%{escaped}%"
+            params.extend([like, like, like])
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        if first_seen_from:
+            clauses.append("date(first_seen_at) >= date(?)")
+            params.append(first_seen_from)
+        if first_seen_to:
+            clauses.append("date(first_seen_at) <= date(?)")
+            params.append(first_seen_to)
+        if last_seen_from:
+            clauses.append("date(last_seen_at) >= date(?)")
+            params.append(last_seen_from)
+        if last_seen_to:
+            clauses.append("date(last_seen_at) <= date(?)")
+            params.append(last_seen_to)
+        if groups:
+            if isinstance(groups, str):
+                groups = [g.strip() for g in groups.split(",") if g.strip()]
+            group_parts: list[str] = []
+            for g in groups:
+                escaped = _escape_like(g)
+                group_parts.append("group_ids LIKE ? ESCAPE '\\'")
+                params.append(f'%"{escaped}"%')
+            if group_parts:
+                clauses.append(f"({' OR '.join(group_parts)})")
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        order_clause = _build_order_clause(
+            sort_by,
+            sort_dir,
+            _USER_PROFILE_SORT_FIELDS,
+            "ORDER BY violation_count DESC, last_seen_at DESC",
+            "user_id",
+        )
+        try:
+            async with aiosqlite.connect(self._db_path) as conn:
+                conn.row_factory = aiosqlite.Row
+                cursor = await conn.cursor()
+                total = (
+                    await (
+                        await cursor.execute(
+                            f"SELECT COUNT(*) FROM user_profiles {where}", params
+                        )
+                    ).fetchone()
+                )[0]
+                await cursor.execute(
+                    f"SELECT * FROM user_profiles {where} {order_clause} LIMIT ? OFFSET ?",
+                    [*params, page_size, (page - 1) * page_size],
+                )
+                rows = [dict(r) for r in await cursor.fetchall()]
+                return rows, total
+        except Exception as e:
+            logger.error(f"list_user_profiles 失败: {e}")
+            return [], 0
+
+    async def get_user_profile(self, user_id: str) -> dict | None:
+        """按 user_id 获取单个用户档案"""
+        await self._init_db()
+        async with aiosqlite.connect(self._db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.cursor()
+            await cursor.execute(
+                "SELECT * FROM user_profiles WHERE user_id = ?", (user_id,)
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def create_user_profile(self, data: dict) -> bool:
+        """手动创建用户档案（user_id 必填，重复返回 False）"""
+        import json
+
+        user_id = data.get("user_id")
+        if not user_id:
+            return False
+        group_ids_val = data.get("group_ids", [])
+        if isinstance(group_ids_val, list):
+            group_ids_json = json.dumps(
+                [str(g) for g in group_ids_val], ensure_ascii=False
+            )
+        elif isinstance(group_ids_val, str):
+            group_ids_json = group_ids_val or "[]"
+        else:
+            group_ids_json = "[]"
+        now_iso = datetime.now().isoformat()
+        await self._init_db()
+        try:
+            async with aiosqlite.connect(self._db_path) as conn:
+                cursor = await conn.cursor()
+                await cursor.execute(
+                    """INSERT INTO user_profiles
+                       (user_id, nickname, group_ids, note, status,
+                        violation_count, first_seen_at, last_seen_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        user_id,
+                        data.get("nickname", "") or "",
+                        group_ids_json,
+                        data.get("note", "") or "",
+                        data.get("status", "normal") or "normal",
+                        int(data.get("violation_count", 0) or 0),
+                        now_iso,
+                        now_iso,
+                        now_iso,
+                    ),
+                )
+                await conn.commit()
+                return True
+        except aiosqlite.IntegrityError:
+            return False
+
+    async def update_user_profile(self, user_id: str, fields: dict) -> bool:
+        """编辑用户档案（允许 nickname / note / status / group_ids）"""
+        import json
+
+        filtered: dict = {}
+        for k, v in fields.items():
+            if k not in ("nickname", "note", "status", "group_ids"):
+                continue
+            if k == "group_ids":
+                if isinstance(v, list):
+                    filtered[k] = json.dumps([str(x) for x in v], ensure_ascii=False)
+                elif isinstance(v, str):
+                    filtered[k] = v
+                else:
+                    continue
+            else:
+                filtered[k] = v
+        if not filtered:
+            return False
+        filtered["updated_at"] = datetime.now().isoformat()
+        await self._init_db()
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+            set_clause = ", ".join(f"{k} = ?" for k in filtered)
+            values = list(filtered.values())
+            values.append(user_id)
+            await cursor.execute(
+                f"UPDATE user_profiles SET {set_clause} WHERE user_id = ?", values
+            )
+            await conn.commit()
+            return cursor.rowcount > 0
+
+    async def delete_user_profile(self, user_id: str) -> bool:
+        """删除用户档案"""
+        await self._init_db()
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute(
+                "DELETE FROM user_profiles WHERE user_id = ?", (user_id,)
+            )
+            await conn.commit()
+            return cursor.rowcount > 0
+
+    # ========== WebUI：概览统计 ==========
+
+    async def get_overview_stats(self) -> dict:
+        """Dashboard 概览数据：今日/累计统计、风险等级分布、7日趋势、Top 违规用户、群分布"""
+        import logging
+
+        logger = logging.getLogger(__name__)
+        empty = {
+            "today_audits": 0,
+            "today_violations": 0,
+            "total_audits": 0,
+            "total_violations": 0,
+            "risk_distribution": {"pass": 0, "review": 0, "block": 0},
+            "whitelist_count": 0,
+            "blacklist_count": 0,
+            "user_profiles_count": 0,
+            "trend_7days": [],
+            "top_violators": [],
+            "group_distribution": [],
+        }
+        await self._init_db()
+        try:
+            today_str = date.today().isoformat()
+            async with aiosqlite.connect(self._db_path) as conn:
+                conn.row_factory = aiosqlite.Row
+                cursor = await conn.cursor()
+
+                async def _scalar(sql: str, params: tuple = ()) -> int:
+                    row = await (await cursor.execute(sql, params)).fetchone()
+                    return row[0] if row and row[0] is not None else 0
+
+                today_audits = await _scalar(
+                    "SELECT COUNT(*) FROM audit_log WHERE date(created_at) >= date(?)",
+                    (today_str,),
+                )
+                today_violations = await _scalar(
+                    "SELECT COUNT(*) FROM violation_records "
+                    "WHERE date(violation_time) >= date(?)",
+                    (today_str,),
+                )
+                total_audits = await _scalar("SELECT COUNT(*) FROM audit_log")
+                total_violations = await _scalar(
+                    "SELECT COUNT(*) FROM violation_records"
+                )
+
+                # 风险等级分布（违规记录维度）
+                risk_distribution = {"pass": 0, "review": 0, "block": 0}
+                await cursor.execute(
+                    "SELECT risk_level, COUNT(*) FROM violation_records GROUP BY risk_level"
+                )
+                for row in await cursor.fetchall():
+                    try:
+                        name = RiskLevel(row[0]).name.lower()
+                    except ValueError:
+                        continue
+                    if name in risk_distribution:
+                        risk_distribution[name] = row[1]
+
+                whitelist_count = await _scalar("SELECT COUNT(*) FROM manual_whitelist")
+                blacklist_count = await _scalar("SELECT COUNT(*) FROM manual_blacklist")
+                user_profiles_count = await _scalar(
+                    "SELECT COUNT(*) FROM user_profiles"
+                )
+
+                # 7 日趋势（2 次 GROUP BY 查询代替逐天查询）
+                today = date.today()
+                start_str = (today - timedelta(days=6)).isoformat()
+                await cursor.execute(
+                    "SELECT date(created_at) AS d, COUNT(*) AS c FROM audit_log "
+                    "WHERE date(created_at) >= date(?) GROUP BY d",
+                    (start_str,),
+                )
+                audit_counts = {r["d"]: r["c"] for r in await cursor.fetchall()}
+                await cursor.execute(
+                    "SELECT date(violation_time) AS d, COUNT(*) AS c FROM violation_records "
+                    "WHERE date(violation_time) >= date(?) GROUP BY d",
+                    (start_str,),
+                )
+                viol_counts = {r["d"]: r["c"] for r in await cursor.fetchall()}
+                trend: list[dict] = []
+                for i in range(6, -1, -1):
+                    d_str = (today - timedelta(days=i)).isoformat()
+                    trend.append(
+                        {
+                            "date": d_str,
+                            "audits": audit_counts.get(d_str, 0),
+                            "violations": viol_counts.get(d_str, 0),
+                        }
+                    )
+
+                # Top 10 违规用户
+                await cursor.execute(
+                    """SELECT user_id, nickname, violation_count FROM user_profiles
+                       WHERE violation_count > 0
+                       ORDER BY violation_count DESC LIMIT 10"""
+                )
+                top_violators = [dict(r) for r in await cursor.fetchall()]
+
+                # 群分布 Top 10（按审核数）
+                await cursor.execute(
+                    """SELECT group_id,
+                              COUNT(*) AS audits,
+                              COALESCE((
+                                  SELECT COUNT(*) FROM violation_records v
+                                  WHERE v.group_id = audit_log.group_id
+                              ), 0) AS violations
+                       FROM audit_log
+                       WHERE group_id IS NOT NULL
+                       GROUP BY group_id
+                       ORDER BY audits DESC LIMIT 10"""
+                )
+                group_distribution = [dict(r) for r in await cursor.fetchall()]
+
+                return {
+                    "today_audits": today_audits,
+                    "today_violations": today_violations,
+                    "total_audits": total_audits,
+                    "total_violations": total_violations,
+                    "risk_distribution": risk_distribution,
+                    "whitelist_count": whitelist_count,
+                    "blacklist_count": blacklist_count,
+                    "user_profiles_count": user_profiles_count,
+                    "trend_7days": trend,
+                    "top_violators": top_violators,
+                    "group_distribution": group_distribution,
+                }
+        except Exception as e:
+            logger.error(f"get_overview_stats 失败: {e}")
+            return empty
+
+    async def get_group_violation_stats(self, group_id: str) -> dict:
+        """单个群的违规统计（/审核状态 指令与 WebUI 共用）"""
+        await self._init_db()
+        today_str = date.today().isoformat()
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+            total = (
+                await (
+                    await cursor.execute(
+                        "SELECT COUNT(*) FROM violation_records WHERE group_id = ?",
+                        (group_id,),
+                    )
+                ).fetchone()
+            )[0]
+            today = (
+                await (
+                    await cursor.execute(
+                        "SELECT COUNT(*) FROM violation_records "
+                        "WHERE group_id = ? AND date(violation_time) >= date(?)",
+                        (group_id, today_str),
+                    )
+                ).fetchone()
+            )[0]
+            today_audits = (
+                await (
+                    await cursor.execute(
+                        "SELECT COUNT(*) FROM audit_log "
+                        "WHERE group_id = ? AND date(created_at) >= date(?)",
+                        (group_id, today_str),
+                    )
+                ).fetchone()
+            )[0]
+            return {
+                "total_violations": total,
+                "today_violations": today,
+                "today_audits": today_audits,
+            }
+
+    # ========== 证据图片回填（v1.5.0） ==========
+
+    async def backfill_evidence_paths(self, evidence_dir: str) -> int:
+        """尽力回填旧违规记录的证据图片路径（幂等）。
+
+        证据文件命名格式: {group}_{user}_{timestamp}_{md5前8位}.ext，
+        据此把文件路径写回 violation_records.evidence_path（仅处理空值记录）。
+        """
+        import logging
+
+        logger = logging.getLogger(__name__)
+        if not os.path.isdir(evidence_dir):
+            return 0
+        await self._init_db()
+
+        # 建立 md5 前缀 -> 文件路径 索引
+        prefix_map: dict[str, str] = {}
+        for fname in os.listdir(evidence_dir):
+            base = os.path.splitext(fname)[0]
+            parts = base.rsplit("_", 1)
+            if len(parts) == 2 and len(parts[1]) == 8:
+                prefix_map[parts[1].lower()] = os.path.join(evidence_dir, fname)
+        if not prefix_map:
+            return 0
+
+        filled = 0
+        try:
+            async with aiosqlite.connect(self._db_path) as conn:
+                cursor = await conn.cursor()
+                await cursor.execute(
+                    "SELECT id, md5_hash FROM violation_records "
+                    "WHERE evidence_path IS NULL OR evidence_path = ''"
+                )
+                rows = await cursor.fetchall()
+                for row_id, md5_hash in rows:
+                    if not md5_hash:
+                        continue
+                    path = prefix_map.get(md5_hash[:8].lower())
+                    if path and os.path.isfile(path):
+                        await cursor.execute(
+                            "UPDATE violation_records SET evidence_path = ? WHERE id = ?",
+                            (path, row_id),
+                        )
+                        filled += 1
+                await conn.commit()
+            if filled:
+                logger.info(f"证据图片路径回填完成: {filled} 条记录")
+        except Exception as e:
+            logger.error(f"证据图片回填失败: {e}")
+        return filled

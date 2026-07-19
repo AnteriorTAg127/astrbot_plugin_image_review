@@ -81,6 +81,11 @@ class ViolationHandler:
             if not group_config:
                 return
 
+            # 0. 保存证据图片（无论是否有管理群都保存，供 WebUI 展示，v1.5.0）
+            evidence_path = await self._download_evidence_image(
+                image_url, group_id, user_id, image_data
+            )
+
             # 检查用户是否为管理员或群主
             is_admin = await self._admin_manager.is_user_admin(event, group_id, user_id)
             if is_admin:
@@ -100,7 +105,7 @@ class ViolationHandler:
                     is_admin=True,
                     auto_recall=group_config.get("auto_recall", True),
                     auto_mute=group_config.get("auto_mute", True),
-                    image_data=image_data,
+                    evidence_path=evidence_path,
                 )
                 logger.info(f"管理员违规通知已发送: 用户={user_id}, 群={group_id}")
                 return
@@ -125,7 +130,7 @@ class ViolationHandler:
             else:
                 mute_duration = 0
 
-            # 4. 记录违规
+            # 4. 记录违规（含用户名与证据路径，v1.5.0）
             await self._db.record_violation(
                 user_id=user_id,
                 group_id=group_id,
@@ -135,6 +140,8 @@ class ViolationHandler:
                 risk_reason=risk_reason,
                 mute_duration=mute_duration,
                 message_id=message_id,
+                user_name=user_name,
+                evidence_path=evidence_path,
             )
 
             # 违规次数+1（因为刚记录的违规）
@@ -154,7 +161,7 @@ class ViolationHandler:
                 violation_count,
                 auto_recall=group_config.get("auto_recall", True),
                 auto_mute=group_config.get("auto_mute", True),
-                image_data=image_data,
+                evidence_path=evidence_path,
             )
 
             logger.info(
@@ -232,7 +239,7 @@ class ViolationHandler:
         is_admin: bool = False,
         auto_recall: bool = True,
         auto_mute: bool = True,
-        image_data: bytes | None = None,
+        evidence_path: str | None = None,
     ) -> None:
         """
         通知管理群
@@ -251,17 +258,12 @@ class ViolationHandler:
             is_admin: 是否为管理员/群主
             auto_recall: 是否自动撤回
             auto_mute: 是否自动禁言
-            image_data: 已下载的图片数据（可选，避免重复下载）
+            evidence_path: 已保存的证据图片路径（v1.5.0 起由 handle_violation 统一保存）
         """
         try:
             manage_group_id = self._config_manager.get_manage_group_id(group_id)
             if not manage_group_id:
                 return
-
-            # 下载并保存证据图片（如果传入了图片数据则直接使用）
-            evidence_path = await self._download_evidence_image(
-                image_url, group_id, user_id, image_data
-            )
 
             # 格式化处理措施
             if is_admin:

@@ -213,6 +213,12 @@
                         "description": "群号",
                         "hint": "需要审核的群聊QQ号"
                     },
+                    "group_name": {
+                        "type": "string",
+                        "description": "群别名",
+                        "hint": "可选。用于 WebUI 与状态统计展示的名称，留空则展示群号",
+                        "default": ""
+                    },
                     "manage_group_id": {
                         "type": "string",
                         "description": "管理群号",
