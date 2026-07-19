@@ -235,7 +235,8 @@ class DatabaseManager:
                     risk_level INTEGER,
                     risk_reason TEXT,
                     source TEXT,
-                    created_at TEXT
+                    created_at TEXT,
+                    cost REAL DEFAULT 0
                 )
             """)
 
@@ -381,8 +382,7 @@ class DatabaseManager:
                 ("note", "TEXT DEFAULT ''"),
                 ("phash", "TEXT"),
                 ("dhash", "TEXT"),
-                ("cost", "REAL DEFAULT 0"),
-            ):
+            ):  # fmt: skip
                 try:
                     await cursor.execute(
                         f"ALTER TABLE violation_records ADD COLUMN {column} {type_def}"
@@ -394,6 +394,15 @@ class DatabaseManager:
             # 2. 人工名单表群级化重建
             await self._rebuild_manual_list_with_group(cursor, "manual_whitelist")
             await self._rebuild_manual_list_with_group(cursor, "manual_blacklist")
+
+            # 3. audit_log 迁移（v1.5.4：增加 cost 列，存储该次审核所有 LLM 调用总成本）
+            try:
+                await cursor.execute(
+                    "ALTER TABLE audit_log ADD COLUMN cost REAL DEFAULT 0"
+                )
+                logger.debug("audit_log 迁移: 新增列 cost")
+            except aiosqlite.OperationalError:
+                pass  # 列已存在
 
             await conn.commit()
 
