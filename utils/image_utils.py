@@ -109,13 +109,46 @@ class ImageUtils:
         return False
 
     @staticmethod
+    def extract_md5_from_filename(file_value: str | None) -> str | None:
+        """
+        从 OneBot image 段的 file 字段（或任意文件名/路径）提取 QQ MD5
+
+        file 字段形如 "8245CA6AFB584153BAB6638BC05FC9D9.jpg"。
+        注意：v4.26.x PreProcessStage 物化后 comp.file 变为
+        "media_image_<uuid>.<ext>"，此时无法提取 QQ MD5，返回 None，
+        由调用方用下载到的字节计算 MD5 兜底。
+
+        Args:
+            file_value: file 字段值（文件名、路径或 URL）
+
+        Returns:
+            小写的 MD5 字符串，无法提取则返回 None
+        """
+        if not file_value:
+            return None
+        try:
+            # 移除可能的URL参数
+            name = file_value.split("?")[0]
+            # 移除路径，只保留文件名
+            name = os.path.basename(name)
+            # 移除扩展名，获取MD5
+            md5_hex = os.path.splitext(name)[0]
+            # 验证MD5格式（32位十六进制字符串）
+            if ImageUtils.is_valid_md5(md5_hex):
+                return md5_hex.lower()
+        except Exception as e:
+            logger.debug(f"提取图片MD5时发生异常: {e}")
+        return None
+
+    @staticmethod
     def extract_image_md5(
         event: AstrMessageEvent, image_comp: Comp.Image
     ) -> str | None:
         """
-        从图片组件中提取图片的MD5值
+        从图片组件的 file 字段提取图片的MD5值
 
         从图片文件名中提取MD5，文件名格式通常为: 306AED23E3B7AA81B51A3B2A6FAAAF73.jpg
+        注意：v4.26.x 物化后 comp.file 为本地临时路径，会返回 None。
 
         Args:
             event: 消息事件
@@ -124,23 +157,7 @@ class ImageUtils:
         Returns:
             图片MD5字符串，如果无法获取则返回None
         """
-        try:
-            if image_comp.file:
-                # 从文件名中提取MD5（去掉扩展名）
-                file_name = image_comp.file
-                # 移除可能的URL参数
-                if "?" in file_name:
-                    file_name = file_name.split("?")[0]
-                # 移除路径，只保留文件名
-                file_name = os.path.basename(file_name)
-                # 移除扩展名，获取MD5
-                md5_hex = os.path.splitext(file_name)[0]
-                # 验证MD5格式（32位十六进制字符串）
-                if ImageUtils.is_valid_md5(md5_hex):
-                    return md5_hex.lower()
-        except Exception as e:
-            logger.debug(f"提取图片MD5时发生异常: {e}")
-        return None
+        return ImageUtils.extract_md5_from_filename(image_comp.file)
 
     @staticmethod
     def _dct_1d(vector: list[float]) -> list[float]:

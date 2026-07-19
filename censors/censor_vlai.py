@@ -242,6 +242,13 @@ class VLAICensor(CensorBase):
                 base64_data, mime_type = await asyncio.to_thread(
                     self._resize_image_if_needed, image_data
                 )
+            elif image_data:
+                # 本地路径 / file URI 等，上层已下载为字节
+                # （v4.26.x PreProcessStage 物化后 comp.url 为本地路径的兜底）
+                logger.debug(f"使用已下载的本地图片数据，大小: {len(image_data)} bytes")
+                base64_data, mime_type = await asyncio.to_thread(
+                    self._resize_image_if_needed, image_data
+                )
             else:
                 raise CensorError(f"不支持的图片格式: {image[:50]}...")
 

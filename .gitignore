@@ -212,3 +212,19 @@ __marimo__/
 
 # Claude Code internal files
 .claude/
+
+# CodeGraph 索引（本地构建缓存，不提交）
+.codegraph/
+
+# Claude Code 项目级指令（不提交）
+CLAUDE.md
+
+# 插件运行数据库
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# 本地文档与开发笔记
+docs/
+开发/

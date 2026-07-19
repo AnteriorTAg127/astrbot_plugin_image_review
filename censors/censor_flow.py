@@ -4,12 +4,10 @@
 """
 
 import asyncio
-import os
 from typing import Any
 
-import aiohttp
-
 from astrbot.api import logger
+from astrbot.core.utils.media_utils import MediaResolver
 
 from ..database import DatabaseManager, RiskLevel
 from ..utils import ImageUtils
@@ -17,21 +15,6 @@ from .censor_aliyun import AliyunCensor
 from .censor_base import CensorBase, CensorError
 from .censor_vlai import VLAICensor
 from .gif_censor import GIFCensor
-
-# 单例会话管理
-_download_session = None
-_download_semaphore = None
-
-
-async def _ensure_download_session():
-    """确保下载会话已初始化"""
-    global _download_session, _download_semaphore
-    if _download_session is None:
-        _download_session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=30)
-        )
-    if _download_semaphore is None:
-        _download_semaphore = asyncio.Semaphore(20)  # 限制并发下载数
 
 
 def _validate_image_content(data: bytes) -> bool:
@@ -70,72 +53,42 @@ def _validate_image_content(data: bytes) -> bool:
 
 async def download_image(url: str, max_size_mb: int = 10) -> bytes:
     """
-    异步下载图片
+    获取图片字节数据
+
+    使用 AstrBot 的 MediaResolver 统一处理多种来源：
+    HTTP(S) URL、本地文件路径、file:// URI、base64://、data URI。
+    兼容 v4.26.x PreProcessStage 物化后 comp.url 为本地路径的情况。
 
     Args:
-        url: 图片URL地址
+        url: 图片URL或本地路径
         max_size_mb: 最大允许的图片大小（MB），默认10MB
 
     Returns:
         图片的原始字节数据
 
     Raises:
-        CensorError: 下载失败或图片过大
+        CensorError: 获取失败或图片过大或格式无效
     """
-    await _ensure_download_session()
-    proxy = os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY")
     max_size_bytes = max_size_mb * 1024 * 1024
 
-    async with _download_semaphore:
-        async with _download_session.get(url, proxy=proxy) as resp:
-            if resp.status != 200:
-                raise CensorError(f"图片下载失败，状态码: {resp.status}")
+    try:
+        data = await MediaResolver(url, media_type="image").to_bytes()
+    except Exception as e:
+        raise CensorError(f"图片获取失败: {e}")
 
-            # 检查Content-Type头
-            content_type = resp.headers.get("Content-Type", "").lower()
-            allowed_types = ["image/", "application/octet-stream"]
-            if not any(ct in content_type for ct in allowed_types) and content_type:
-                logger.warning(f"下载的内容类型可能不是图片: {content_type}")
+    if len(data) > max_size_bytes:
+        raise CensorError(
+            f"图片过大: {len(data) / 1024 / 1024:.2f}MB，超过限制 {max_size_mb}MB"
+        )
 
-            # 检查Content-Length头
-            content_length = resp.headers.get("Content-Length")
-            if content_length:
-                try:
-                    size = int(content_length)
-                    if size > max_size_bytes:
-                        raise CensorError(
-                            f"图片过大: {size / 1024 / 1024:.2f}MB，超过限制 {max_size_mb}MB"
-                        )
-                except ValueError:
-                    pass  # 如果解析失败，继续下载并在读取时检查
+    # 验证内容是否为有效图片（在线程池中执行以避免阻塞事件循环，设置5秒超时）
+    is_valid = await asyncio.wait_for(
+        asyncio.to_thread(_validate_image_content, data), timeout=5.0
+    )
+    if not is_valid:
+        raise CensorError("获取的内容不是有效的图片格式")
 
-            # 流式读取并检查大小
-            chunks = []
-            total_size = 0
-            async for chunk in resp.content.iter_chunked(8192):
-                chunks.append(chunk)
-                total_size += len(chunk)
-                if total_size > max_size_bytes:
-                    raise CensorError(f"图片过大，超过限制 {max_size_mb}MB")
-
-            data = b"".join(chunks)
-
-            # 验证下载的内容是否为有效图片（在线程池中执行以避免阻塞事件循环，设置5秒超时）
-            is_valid = await asyncio.wait_for(
-                asyncio.to_thread(_validate_image_content, data), timeout=5.0
-            )
-            if not is_valid:
-                raise CensorError("下载的内容不是有效的图片格式")
-
-            return data
-
-
-async def close_download_session():
-    """关闭下载会话"""
-    global _download_session
-    if _download_session:
-        await _download_session.close()
-        _download_session = None
+    return data
 
 
 class CensorFlow:
@@ -229,10 +182,7 @@ class CensorFlow:
             logger.debug("关闭审核器")
             await self._image_censor.close()
             logger.debug("审核器已关闭")
-        # 关闭下载会话
-        logger.debug("关闭下载会话")
-        await close_download_session()
-        logger.debug("下载会话已关闭")
+        # MediaResolver 自管临时文件，无需额外关闭下载会话
 
     async def submit_image(
         self,
@@ -428,9 +378,25 @@ class CensorFlow:
             # 普通静图检测（始终执行，确保 risk_level 一定有值）
             logger.debug("使用普通静图检测")
             image_input = image_url
-            risk_level, risk_words = await self._image_censor.detect_image(
-                image_input, downloaded_image_data
-            )
+            try:
+                risk_level, risk_words = await self._image_censor.detect_image(
+                    image_input, downloaded_image_data
+                )
+            except CensorError as e:
+                # 非公网 URL（如本地路径）且审核器需要公网 URL（如 Aliyun 2.0 baselineCheck
+                # 不支持 base64）时，detect_image 会抛 CensorError。
+                # 降级为跳过 + 警告，避免整条消息报错；不写入黑白名单/哈希。
+                if not image_input.startswith("http"):
+                    logger.warning(
+                        f"图片无法通过 API 审核（非公网 URL，可能为本地路径），跳过: {e}"
+                    )
+                    return (
+                        RiskLevel.Pass,
+                        "非公网URL，跳过API审核",
+                        md5_hash,
+                        downloaded_image_data,
+                    )
+                raise
             risk_reason = ", ".join(risk_words) if risk_words else ""
             logger.debug(
                 f"静图检测完成，风险等级: {risk_level.name}, 原因: {risk_reason}"

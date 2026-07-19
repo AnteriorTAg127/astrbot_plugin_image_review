@@ -23,7 +23,7 @@ from .utils import ImageUtils, MessageUtils
     "image_review",
     "AnteriorTAg127",
     "图片审核插件，提供图片内容审核、违规处理、管理群通知等功能",
-    "1.3.7",
+    "1.4.1",
 )
 class ImageReviewPlugin(Star):
     """图片审核插件主类"""
@@ -173,34 +173,38 @@ class ImageReviewPlugin(Star):
             # 检查是否跳过QQ自带表情包
             skip_qq_emoji = self._config.get("skip_qq_builtin_emoji", True)
 
-            for comp in message_chain:
-                if isinstance(comp, Comp.Image):
-                    image_url = comp.url
-                    image_md5 = ImageUtils.extract_image_md5(event, comp)
-
-                    # 跳过QQ官方表情包（如果开启此选项）
+            # 优先从协议端原始消息提取图片（避免 v4.26.x PreProcessStage 物化后
+            # comp.url 变成本地路径，导致下载/Aliyun 审核/表情跳过全部失效）
+            original_images = self._extract_original_images(event)
+            if original_images is not None:
+                # 主路径：用协议端原始公网 URL 走正常流水线
+                for image_url, image_md5 in original_images:
                     if skip_qq_emoji and ImageUtils.is_qq_builtin_emoji(image_url):
                         continue
+                    images_to_check.append((image_url, image_md5))
+            else:
+                # 回退路径：raw_message 不可用（非 aiocqhttp 等），用消息链中的 comp.url
+                for comp in message_chain:
+                    if isinstance(comp, Comp.Image):
+                        image_url = comp.url
+                        image_md5 = ImageUtils.extract_image_md5(event, comp)
+                        if skip_qq_emoji and ImageUtils.is_qq_builtin_emoji(image_url):
+                            continue
+                        if image_url:
+                            images_to_check.append((image_url, image_md5))
 
-                    if image_url:
-                        images_to_check.append((image_url, image_md5))
-
-                elif isinstance(comp, Comp.Forward):
-                    # 检查是否启用了转发消息图片检测
-                    enable_forward_censor = self._config.get(
-                        "enable_forward_image_censor", False
-                    )
-                    if not enable_forward_censor:
-                        continue
-
-                    # 处理转发消息中的图片
-                    forward_images = await self._extract_forward_images(event, comp)
-                    if forward_images:
-                        # 应用抽检逻辑
-                        sampled_images = self._sample_images(
-                            forward_images, group_id
-                        )
-                        images_to_check.extend(sampled_images)
+            # 转发消息图片（不受物化影响，走 get_forward_msg API 获取原始 URL）
+            if self._config.get("enable_forward_image_censor", False):
+                for comp in message_chain:
+                    if isinstance(comp, Comp.Forward):
+                        # 处理转发消息中的图片
+                        forward_images = await self._extract_forward_images(event, comp)
+                        if forward_images:
+                            # 应用抽检逻辑
+                            sampled_images = self._sample_images(
+                                forward_images, group_id
+                            )
+                            images_to_check.extend(sampled_images)
 
             # 检查是否是图片消息且启用了图片审核
             if not images_to_check:
@@ -256,6 +260,48 @@ class ImageReviewPlugin(Star):
             logger.error(f"图片审核异常: {e}")
         except Exception as e:
             logger.error(f"消息处理异常: {e}")
+
+    def _extract_original_images(
+        self, event: AstrMessageEvent
+    ) -> list[tuple[str, str | None]] | None:
+        """
+        从协议端原始消息提取图片 (url, md5)，按消息顺序对齐
+
+        v4.26.x PreProcessStage 会把 Image 组件的 url/file/path 覆写为本地临时路径，
+        但不会修改 message_obj.raw_message。本方法从 raw_message 中恢复原始公网 URL
+        与 QQ MD5 文件名，使下游下载、Aliyun 审核、表情跳过等按物化前逻辑工作。
+
+        目前仅适配 aiocqhttp 平台（Event.message 为 OneBot 段列表）。
+
+        Args:
+            event: 消息事件
+
+        Returns:
+            list[(url, md5)]：成功提取时返回（可能为空列表，顺序与消息中图片顺序一致）。
+            None：该平台不支持或 raw_message 不可用，调用方需回退到 comp.url。
+        """
+        try:
+            if event.get_platform_name() != "aiocqhttp":
+                return None
+            raw = getattr(event.message_obj, "raw_message", None)
+            segments = raw.get("message") if isinstance(raw, dict) else None
+            if not isinstance(segments, list):
+                return None
+
+            result: list[tuple[str, str | None]] = []
+            for seg in segments:
+                if not (isinstance(seg, dict) and seg.get("type") == "image"):
+                    continue
+                data = seg.get("data", {}) or {}
+                url = data.get("url", "")
+                if not url.startswith("http"):
+                    continue  # 无公网 URL 的段交给回退分支处理
+                md5 = ImageUtils.extract_md5_from_filename(data.get("file", ""))
+                result.append((url, md5))
+            return result
+        except Exception as e:
+            logger.debug(f"从 raw_message 提取原始图片失败，将回退到 comp.url: {e}")
+            return None
 
     async def _extract_forward_images(
         self, event: AstrMessageEvent, forward_comp: Comp.Forward

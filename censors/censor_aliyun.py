@@ -275,7 +275,9 @@ class AliyunCensor(CensorBase):
             return RiskLevel.Review, {"阿里云接口暂不支持base64图片"}
 
         if not image.startswith("http"):
-            raise CensorError("预期外的输入")
+            raise CensorError(
+                "阿里云审核需要公网可访问的图片 URL，当前为本地文件且无法获取原始 URL"
+            )
 
         try:
             body = {

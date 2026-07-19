@@ -1,5 +1,15 @@
 # 更新日志
 
+## v1.4.1
+
+- **修复 v4.26.x 图片审核崩溃** - 解决 AstrBot v4.26.x 起 `PreProcessStage` 把 `Image.url` 覆写为本地临时路径导致的 `图片审核流程异常: /AstrBot/data/temp/media_image_xxx.gif` 崩溃
+  - 根因：`PreProcessStage`（`astrbot/core/pipeline/preprocess_stage/stage.py`）下载图片到 `data/temp/` 并覆写 `comp.url/file/path`，但 `raw_message` 保留原始协议端内容
+  - 主方案：aiocqhttp 下优先从 `event.message_obj.raw_message` 恢复原始公网 URL 与 QQ MD5，走原有正常流水线（下载、Aliyun、VLAI、GIF 检测、表情跳过均恢复物化前行为）
+  - 兜底：`download_image` 改用 AstrBot `MediaResolver`，兼容本地路径 / `file://` / base64 / HTTP；VLAI `detect_image` 增加"已有字节直接用"分支；Aliyun 无公网 URL 时降级跳过 + 警告
+- **修复 QQ 表情跳过回归** - 物化后 `comp.url` 为本地路径导致 `is_qq_builtin_emoji` 失效，现通过原始 URL 恢复识别
+- **新增工具方法** - `ImageUtils.extract_md5_from_filename`，从 OneBot image 段 `file` 字段提取 QQ MD5
+- **移除冗余资源** - 移除自维护的 aiohttp 下载会话（`_download_session`/`_download_semaphore`/`close_download_session`），统一由 `MediaResolver` 管理
+
 ## v1.3.8
 
 - **重构阿里云审核实现** - 将阿里云 SDK 调用改为直接 HTTP API 调用，解决与 AstrBot cryptography 版本冲突问题
