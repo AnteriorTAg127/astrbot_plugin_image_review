@@ -331,6 +331,7 @@ class WebApiHandler:
                 date_from=request.query.get("date_from") or None,
                 date_to=request.query.get("date_to") or None,
             )
+            await self._enrich_violation_hashes(items)
             return json_response(
                 {
                     "items": [_sanitize_violation(item) for item in items],
@@ -352,10 +353,32 @@ class WebApiHandler:
             row = await self._db.get_violation(vid_int)
             if row is None:
                 return error_response("not found", status_code=404)
+            await self._enrich_violation_hashes([row])
             return json_response(_sanitize_violation(row))
         except Exception:
             logger.exception("[web_api] api_violations_get failed")
             return error_response("internal error", status_code=500)
+
+    async def _enrich_violation_hashes(self, items: list[dict]) -> None:
+        """为违规记录补全感知哈希（v1.5.2 展示用）。
+
+        记录自带 phash/dhash 时直接用；缺失时（旧记录）按 md5 回退查 image_hashes。
+        """
+        missing = [
+            it.get("md5_hash")
+            for it in items
+            if it and not it.get("phash") and not it.get("dhash") and it.get("md5_hash")
+        ]
+        fallback = await self._db.get_hashes_for_md5s(missing) if missing else {}
+        for it in items:
+            if not it:
+                continue
+            if it.get("phash") or it.get("dhash"):
+                continue
+            h = fallback.get(it.get("md5_hash"))
+            if h:
+                it["phash"] = h.get("phash")
+                it["dhash"] = h.get("dhash")
 
     async def api_violations_update(self, vid: str) -> Any:
         """POST /violations/<vid>/update  body: {user_name?, note?}"""

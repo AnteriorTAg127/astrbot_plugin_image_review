@@ -23,7 +23,7 @@ from .utils import ImageUtils, MessageUtils
     "image_review",
     "AnteriorTAg127",
     "图片审核插件，提供图片内容审核、违规处理、管理群通知等功能",
-    "1.5.2",
+    "1.5.3",
 )
 class ImageReviewPlugin(Star):
     """图片审核插件主类"""
@@ -283,6 +283,16 @@ class ImageReviewPlugin(Star):
 
                     # 处理违规
                     if risk_level in (RiskLevel.Review, RiskLevel.Block):
+                        # 计算感知哈希（仅违规时，供 WebUI 展示十六进制；失败不阻断）
+                        phash: str | None = None
+                        dhash: str | None = None
+                        if image_data:
+                            try:
+                                phash, dhash = await asyncio.to_thread(
+                                    ImageUtils.calculate_image_hashes, image_data
+                                )
+                            except Exception as e:
+                                logger.debug(f"计算感知哈希失败: {e}")
                         await self._violation_handler.handle_violation(
                             event,
                             group_id,
@@ -294,6 +304,8 @@ class ImageReviewPlugin(Star):
                             risk_reason,
                             message_id,
                             image_data,
+                            phash=phash,
+                            dhash=dhash,
                         )
                 except CensorError as e:
                     logger.error(f"图片审核异常: {e}")

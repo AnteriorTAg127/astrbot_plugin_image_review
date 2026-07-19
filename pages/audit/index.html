@@ -51,6 +51,8 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); line
 .btn-primary:hover { background: var(--primary-hover); }
 .btn-danger { background: var(--danger); color: #fff; border-color: var(--danger); }
 .btn-danger:hover { background: var(--danger-hover); }
+.btn-success { background: var(--success); color: #fff; border-color: var(--success); }
+.btn-success:hover { filter: brightness(0.92); }
 .btn-sm { padding: 3px 8px; font-size: 12px; }
 .btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .filter-bar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; align-items: center; }
@@ -630,6 +632,7 @@ tbody tr:hover { background: var(--surface-2); }
       trh.appendChild(makeSortTh("用户", "user_id", s, "violations", onSort));
       trh.appendChild(makeSortTh("风险等级", "risk_level", s, "violations", onSort));
       trh.appendChild(makeSortTh("LLM 分析", null, s, "violations", onSort));
+      trh.appendChild(makeSortTh("感知哈希", null, s, "violations", onSort));
       trh.appendChild(makeSortTh("处理措施", null, s, "violations", onSort));
       trh.appendChild(makeSortTh("备注", null, s, "violations", onSort));
       trh.appendChild(makeSortTh("图片", null, s, "violations", onSort));
@@ -640,7 +643,7 @@ tbody tr:hover { background: var(--surface-2); }
       if (s.items.length === 0) {
         var trE = el("tr");
         var tdE = el("td", { text: "暂无数据" });
-        tdE.setAttribute("colspan", 11);
+        tdE.setAttribute("colspan", 12);
         tdE.style.textAlign = "center";
         tdE.style.color = "var(--text-2)";
         trE.appendChild(tdE);
@@ -672,6 +675,20 @@ tbody tr:hover { background: var(--surface-2); }
           tdReason.appendChild(document.createTextNode(truncate(row.risk_reason || "", 40) || "-"));
           tdReason.addEventListener("click", function(){ openViolationDetail(row); });
           tr.appendChild(tdReason);
+          // 感知哈希列：展示 pHash 十六进制（截断，title 含 pHash/dHash 全文）
+          var tdHash = el("td", { class: "preview" });
+          tdHash.setAttribute("data-label", "感知哈希");
+          var ph = row.phash || "";
+          var dh = row.dhash || "";
+          if (ph || dh) {
+            tdHash.style.fontFamily = "ui-monospace, monospace";
+            tdHash.style.fontSize = "11px";
+            tdHash.setAttribute("title", "pHash: " + (ph || "-") + "\ndHash: " + (dh || "-"));
+            tdHash.appendChild(document.createTextNode(truncate(ph || dh, 16)));
+          } else {
+            tdHash.appendChild(document.createTextNode("-"));
+          }
+          tr.appendChild(tdHash);
           var mute = parseInt(row.mute_duration, 10) || 0;
           var tdM = el("td", { text: mute > 0 ? ("禁言" + mute + "s") : "-" }); tdM.setAttribute("data-label", "处理措施"); tr.appendChild(tdM);
           var tdN = el("td", { text: row.note || "-" }); tdN.setAttribute("data-label", "备注"); tr.appendChild(tdN);
@@ -686,7 +703,12 @@ tbody tr:hover { background: var(--surface-2); }
           }
           tr.appendChild(tdImg);
           var tdOps = el("td"); tdOps.setAttribute("data-label", "操作");
+          var btnWl = el("button", { class: "btn btn-sm btn-success", text: "加白" });
+          btnWl.setAttribute("title", "将该图 MD5 加入全局人工白名单");
+          btnWl.addEventListener("click", function(){ quickWhitelistMd5(row); });
+          tdOps.appendChild(btnWl);
           var btnEdit = el("button", { class: "btn btn-sm", text: "改" });
+          btnEdit.style.marginLeft = "4px";
           btnEdit.addEventListener("click", function(){ openEditViolation(row); });
           var btnDel = el("button", { class: "btn btn-sm btn-danger", text: "删" });
           btnDel.style.marginLeft = "4px";
@@ -757,11 +779,29 @@ tbody tr:hover { background: var(--surface-2); }
     box.appendChild(detailRow("LLM 分析", row.risk_reason || ""));
     box.appendChild(detailRow("图片 URL", row.image_url || ""));
     box.appendChild(detailRow("MD5", row.md5_hash || ""));
+    box.appendChild(detailRow("pHash", row.phash || ""));
+    box.appendChild(detailRow("dHash", row.dhash || ""));
     box.appendChild(detailRow("消息 ID", row.message_id || ""));
     showModal({
       title: "违规详情 #" + row.id,
       content: box,
       actions: [{ label: "关闭", handler: closeModal }]
+    });
+  }
+
+  // 快捷：将该违规图片的 MD5 加入全局人工白名单（审核流程第 1 步检查，始终生效）
+  function quickWhitelistMd5(row) {
+    var md5 = row.md5_hash || "";
+    if (!md5) { toast("该记录无 MD5", "error"); return; }
+    confirmDialog("确认将该图 MD5 加入全局人工白名单？\n" + md5, async function(){
+      try {
+        await apiPost("whitelist", {
+          md5_hash: md5,
+          group_id: "",
+          reason: "快捷添加 自违规#" + row.id
+        });
+        toast("已加入全局人工白名单", "success");
+      } catch (e) { toast("加入白名单失败: " + (e.message || e), "error"); }
     });
   }
 

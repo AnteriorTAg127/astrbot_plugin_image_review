@@ -333,6 +333,8 @@ class DatabaseManager:
                 ("user_name", "TEXT DEFAULT ''"),
                 ("evidence_path", "TEXT"),
                 ("note", "TEXT DEFAULT ''"),
+                ("phash", "TEXT"),
+                ("dhash", "TEXT"),
             ):
                 try:
                     await cursor.execute(
@@ -724,6 +726,8 @@ class DatabaseManager:
         message_id: str | None = None,
         user_name: str = "",
         evidence_path: str | None = None,
+        phash: str | None = None,
+        dhash: str | None = None,
     ):
         """
         记录违规信息
@@ -739,6 +743,8 @@ class DatabaseManager:
             message_id: 消息ID
             user_name: 用户名（v1.5.0，WebUI 展示用）
             evidence_path: 证据图片本地路径（v1.5.0，WebUI 展示用）
+            phash: 感知哈希 pHash 十六进制（v1.5.2，WebUI 展示用，可选）
+            dhash: 感知哈希 dHash 十六进制（v1.5.2，WebUI 展示用，可选）
         """
         import logging
 
@@ -756,8 +762,8 @@ class DatabaseManager:
             await cursor.execute(
                 """INSERT INTO violation_records
                    (user_id, group_id, md5_hash, image_url, risk_level, risk_reason,
-                    mute_duration, message_id, user_name, evidence_path)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    mute_duration, message_id, user_name, evidence_path, phash, dhash)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     user_id,
                     group_id,
@@ -769,6 +775,8 @@ class DatabaseManager:
                     message_id,
                     user_name,
                     evidence_path,
+                    phash,
+                    dhash,
                 ),
             )
             logger.debug("违规记录插入完成")
@@ -2450,3 +2458,32 @@ class DatabaseManager:
                 (path, vid),
             )
             await conn.commit()
+
+    async def get_hashes_for_md5s(self, md5s: list[str]) -> dict[str, dict]:
+        """按 md5 批量查询 image_hashes 中的感知哈希（旧违规记录回退展示用）
+
+        仅返回存在且 phash/dhash 至少其一非空的条目。
+
+        Returns:
+            {md5_hash: {"phash": str|None, "dhash": str|None}}
+        """
+        if not md5s:
+            return {}
+        await self._init_db()
+        result: dict[str, dict] = {}
+        async with aiosqlite.connect(self._db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.cursor()
+            placeholders = ",".join("?" for _ in md5s)
+            await cursor.execute(
+                f"""SELECT md5_hash, phash, dhash FROM image_hashes
+                    WHERE md5_hash IN ({placeholders})
+                      AND (phash IS NOT NULL OR dhash IS NOT NULL)""",
+                md5s,
+            )
+            for row in await cursor.fetchall():
+                result[row["md5_hash"]] = {
+                    "phash": row["phash"],
+                    "dhash": row["dhash"],
+                }
+        return result

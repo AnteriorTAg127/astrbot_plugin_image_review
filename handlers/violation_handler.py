@@ -60,6 +60,8 @@ class ViolationHandler:
         risk_reason: str,
         message_id: str,
         image_data: bytes | None = None,
+        phash: str | None = None,
+        dhash: str | None = None,
     ) -> None:
         """
         处理违规图片
@@ -142,6 +144,8 @@ class ViolationHandler:
                 message_id=message_id,
                 user_name=user_name,
                 evidence_path=evidence_path,
+                phash=phash,
+                dhash=dhash,
             )
 
             # 违规次数+1（因为刚记录的违规）
