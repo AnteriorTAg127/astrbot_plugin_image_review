@@ -381,6 +381,7 @@ class DatabaseManager:
                 ("note", "TEXT DEFAULT ''"),
                 ("phash", "TEXT"),
                 ("dhash", "TEXT"),
+                ("cost", "REAL DEFAULT 0"),
             ):
                 try:
                     await cursor.execute(
@@ -1432,8 +1433,9 @@ class DatabaseManager:
         risk_level: RiskLevel,
         risk_reason: str,
         source: str = "",
-    ):
-        """记录一次图片审核结果（无论通过与否），并更新用户档案活跃时间
+    ) -> int | None:
+        """
+        记录一次图片审核结果（无论通过与否），并更新用户档案活跃时间
 
         Args:
             group_id: 群ID
@@ -1443,10 +1445,14 @@ class DatabaseManager:
             risk_level: 风险等级
             risk_reason: 风险原因（LLM 分析结论）
             source: 审核来源（如 Aliyun / VLAI / cache）
+
+        Returns:
+            插入的 audit_log 行 id，失败返回 None
         """
         import logging
 
         logger = logging.getLogger(__name__)
+        row_id = None
         try:
             await self._init_db()
             async with aiosqlite.connect(self._db_path) as conn:
@@ -1466,15 +1472,51 @@ class DatabaseManager:
                         datetime.now().isoformat(),
                     ),
                 )
+                row_id = cursor.lastrowid
                 await conn.commit()
         except Exception as e:
             logger.error(f"记录审核日志失败: {e}")
-
+            return None
         # 更新用户档案（首末次出现、昵称、所在群），不影响主流程
         try:
             await self.upsert_user_profile(user_id, user_name, group_id)
         except Exception as e:
             logger.error(f"更新用户档案失败: {e}")
+        return row_id
+
+    async def set_audit_cost(self, audit_id: int, total_cost: float) -> None:
+        """将本次审核的全部 LLM 成本回写到 audit_log.cost（供审核日志展示单次成本）"""
+        await self._init_db()
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute(
+                "UPDATE audit_log SET cost = ? WHERE id = ?",
+                (total_cost, audit_id),
+            )
+            await conn.commit()
+
+    async def get_audit_cost_stats(self) -> dict:
+        """审核日志成本统计：总成本 + 有成本记录的审核次数，供概览均价计算
+
+        Returns:
+            {"total_cost": float, "cost_count": int}  (cost_count = 有成本的审核数)
+        """
+        await self._init_db()
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+            total = (
+                await (
+                    await cursor.execute("SELECT COALESCE(SUM(cost), 0) FROM audit_log")
+                ).fetchone()
+            )[0]
+            cnt = (
+                await (
+                    await cursor.execute(
+                        "SELECT COUNT(*) FROM audit_log WHERE cost > 0"
+                    )
+                ).fetchone()
+            )[0]
+            return {"total_cost": total, "cost_count": cnt}
 
     async def cleanup_audit_log(self, keep_days: int = 30) -> int:
         """清理超过保留天数的审核日志"""

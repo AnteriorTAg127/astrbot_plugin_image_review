@@ -287,8 +287,9 @@ class ImageReviewPlugin(Star):
                     )
 
                     # 记录审核日志（无论结果如何，供 WebUI 统计与浏览，v1.5.0）
+                    audit_id = None
                     try:
-                        await self._db.record_audit(
+                        audit_id = await self._db.record_audit(
                             group_id,
                             user_id,
                             user_name,
@@ -332,6 +333,7 @@ class ImageReviewPlugin(Star):
                     logger.error(f"处理图片异常: {e}")
 
                 # v1.5.4：成本记账（遍历本次审核中所有 LLM 调用，对其用量按配置单价算成本）
+                audit_total_cost = 0.0
                 for upid, usage in usages:
                     pricing = pricing_map.get(upid)
                     if not usage or not pricing:
@@ -348,8 +350,19 @@ class ImageReviewPlugin(Star):
                             usage.input_cached,
                             usage.output,
                         )
+                        audit_total_cost += (
+                            usage.input_other * pricing["input_price"]
+                            + usage.input_cached * pricing["cached_price"]
+                            + usage.output * pricing["output_price"]
+                        ) / pricing["price_per"]
                     except Exception as e:
                         logger.debug(f"记录 LLM 成本失败: {e}")
+                # 回写到当次审核日志（供审核日志列展示单次成本 + 概览均价）
+                if audit_id and audit_total_cost > 0:
+                    try:
+                        await self._db.set_audit_cost(audit_id, audit_total_cost)
+                    except Exception as e:
+                        logger.debug(f"回写审核成本失败: {e}")
 
         except CensorError as e:
             logger.error(f"图片审核异常: {e}")

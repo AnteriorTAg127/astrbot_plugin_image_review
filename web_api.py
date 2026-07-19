@@ -308,6 +308,10 @@ class WebApiHandler:
             cache_counts = await self._db.get_cache_counts()
             data["auto_whitelist_count"] = cache_counts.get("whitelist", 0)
             data["auto_blacklist_count"] = cache_counts.get("blacklist", 0)
+            # v1.5.4：成本统计数据
+            cost_stats = await self._db.get_audit_cost_stats()
+            data["audit_total_cost"] = round(cost_stats.get("total_cost", 0), 4)
+            data["audit_cost_count"] = cost_stats.get("cost_count", 0)
             return json_response(data)
         except Exception:
             logger.exception("[web_api] api_stats_overview failed")

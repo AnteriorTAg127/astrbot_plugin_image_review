@@ -551,6 +551,16 @@ tbody tr:hover { background: var(--surface-2); }
             totalLine.appendChild(document.createTextNode("按货币汇总: " + currTotals.map(function(t){ return t.total_cost.toFixed(4) + " " + t.currency; }).join(" | ")));
             content.appendChild(totalLine);
           }
+          // 审核日志总价格 + 均价
+          var auditTotal = stats.audit_total_cost || 0;
+          var auditCnt = stats.audit_cost_count || 0;
+          if (auditTotal > 0 || auditCnt > 0) {
+            var avgLine = el("div", { style: "padding:4px 0 0;font-size:12px;color:var(--text-2);text-align:center;" });
+            avgLine.appendChild(document.createTextNode("审核总成本: " + auditTotal.toFixed(4)
+              + " | 有成本审核: " + auditCnt + " 次"
+              + (auditCnt > 0 ? " | 单次平均: " + (auditTotal / auditCnt).toFixed(6) : "")));
+            content.appendChild(avgLine);
+          }
           // 近 7 天成本趋势
           var costTrend = costData.trend_7days || [];
           if (costTrend.length > 0) {
@@ -966,6 +976,7 @@ tbody tr:hover { background: var(--surface-2); }
       trh.appendChild(makeSortTh("风险等级", "risk_level", s, "audits", onSort));
       trh.appendChild(makeSortTh("分析", null, s, "audits", onSort));
       trh.appendChild(makeSortTh("来源", null, s, "audits", onSort));
+      trh.appendChild(makeSortTh("成本", null, s, "audits", onSort));
       trh.appendChild(makeSortTh("操作", null, s, "audits", onSort));
       thead.appendChild(trh);
       tbl.appendChild(thead);
@@ -1006,6 +1017,9 @@ tbody tr:hover { background: var(--surface-2); }
           tdReason.setAttribute("title", row.risk_reason || "");
           tr.appendChild(tdReason);
           var tdS = el("td", { text: row.source || "-" }); tdS.setAttribute("data-label", "来源"); tr.appendChild(tdS);
+          // 成本列（v1.5.4）
+          var tdC = el("td", { text: (row.cost && row.cost > 0) ? row.cost.toFixed(6) : "-" });
+          tdC.setAttribute("data-label", "成本"); tr.appendChild(tdC);
           var tdOps = el("td"); tdOps.setAttribute("data-label", "操作");
           var btnView = el("button", { class: "btn btn-sm", text: "详情" });
           btnView.addEventListener("click", function(){ openAuditDetail(row); });
