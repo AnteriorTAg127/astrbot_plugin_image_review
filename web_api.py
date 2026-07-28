@@ -285,6 +285,24 @@ class WebApiHandler:
                 "删除模型定价",
             ),
             (f"{prefix}/cost/overview", self.api_cost_overview, ["GET"], "成本概览"),
+            (
+                f"{prefix}/stats/database",
+                self.api_database_stats,
+                ["GET"],
+                "数据库统计",
+            ),
+            (
+                f"{prefix}/settings/retention",
+                self.api_retention_get,
+                ["GET"],
+                "读取日志保留天数",
+            ),
+            (
+                f"{prefix}/settings/retention",
+                self.api_retention_set,
+                ["POST"],
+                "设置日志保留天数",
+            ),
         ]
         ok_cnt = 0
         for route, handler, methods, desc in routes:
@@ -1130,4 +1148,39 @@ class WebApiHandler:
             return json_response(data)
         except Exception:
             logger.exception("[web_api] api_cost_overview failed")
+            return error_response("internal error", status_code=500)
+
+    async def api_database_stats(self) -> Any:
+        """GET /stats/database（各表行数 / 文件体积 / 时间跨度 / 保留策略）"""
+        try:
+            data = await self._db.get_database_stats()
+            return json_response(data)
+        except Exception:
+            logger.exception("[web_api] api_database_stats failed")
+            return error_response("internal error", status_code=500)
+
+    async def api_retention_get(self) -> Any:
+        """GET /settings/retention（审核日志 / 成本日志保留天数）"""
+        try:
+            data = await self._db.get_retention_settings()
+            return json_response(data)
+        except Exception:
+            logger.exception("[web_api] api_retention_get failed")
+            return error_response("internal error", status_code=500)
+
+    async def api_retention_set(self) -> Any:
+        """POST /settings/retention  body: {audit_log_retention_days, cost_log_retention_days}"""
+        try:
+            payload = await _json_body()
+            data = await self._db.set_retention_settings(
+                payload.get("audit_log_retention_days"),
+                payload.get("cost_log_retention_days"),
+            )
+            logger.info(
+                f"[web_api] set_retention by {_current_user()}: "
+                f"audit={data['audit_log_retention_days']} cost={data['cost_log_retention_days']}"
+            )
+            return json_response(data)
+        except Exception:
+            logger.exception("[web_api] api_retention_set failed")
             return error_response("internal error", status_code=500)

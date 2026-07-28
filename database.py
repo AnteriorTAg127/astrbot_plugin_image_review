@@ -316,6 +316,16 @@ class DatabaseManager:
                 )
             """)
 
+            # 插件运行设置表（v1.6.0：保留策略等可在 WebUI 自定义，存 DB 不依赖配置文件）
+            logger.debug("创建插件运行设置表")
+            await cursor.execute("""
+                CREATE TABLE IF NOT EXISTS plugin_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT
+                )
+            """)
+
             # 创建索引
             logger.debug("创建索引")
             await cursor.execute("""
@@ -2443,6 +2453,16 @@ class DatabaseManager:
                 )
                 models = [dict(r) for r in await cursor.fetchall()]
                 total_calls = sum(m.get("call_count", 0) for m in models)
+                # 标注每个模型是否已配置单价（供前端区分「未定价」模型，一键补价）
+                await cursor.execute("SELECT model_id, label FROM model_pricing")
+                priced_map = {
+                    r["model_id"]: (r["label"] or "") for r in await cursor.fetchall()
+                }
+                for m in models:
+                    mid = m.get("model_id")
+                    m["priced"] = mid in priced_map
+                    if priced_map.get(mid):
+                        m["label"] = priced_map[mid]
                 # 按货币汇总
                 currency_totals: dict[str, float] = {}
                 for m in models:
@@ -2624,6 +2644,164 @@ class DatabaseManager:
                 }
         except Exception as e:
             logger.error(f"get_overview_stats 失败: {e}")
+            return empty
+
+    # ========== 插件运行设置（v1.6.0：保留策略等可在 WebUI 自定义，存 DB 不依赖配置文件） ==========
+
+    _RETENTION_DEFAULT = 30
+    _RETENTION_MIN = 1
+    _RETENTION_MAX = 3650
+
+    async def get_setting(self, key: str, default: str | None = None) -> str | None:
+        """读取单个运行设置（key-value，存 plugin_settings 表）"""
+        await self._init_db()
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute(
+                "SELECT value FROM plugin_settings WHERE key = ?", (key,)
+            )
+            row = await cursor.fetchone()
+            return row[0] if row else default
+
+    async def set_setting(self, key: str, value: str) -> bool:
+        """写入单个运行设置（upsert）"""
+        await self._init_db()
+        async with aiosqlite.connect(self._db_path) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute(
+                """INSERT INTO plugin_settings (key, value, updated_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(key) DO UPDATE SET
+                   value=excluded.value, updated_at=excluded.updated_at""",
+                (key, value, datetime.now().isoformat()),
+            )
+            await conn.commit()
+            return cursor.rowcount > 0
+
+    def _clamp_retention(self, value) -> int:
+        """把保留天数夹紧到合法区间，非法值回退默认"""
+        try:
+            v = int(value) if value is not None else self._RETENTION_DEFAULT
+        except (TypeError, ValueError):
+            v = self._RETENTION_DEFAULT
+        return max(self._RETENTION_MIN, min(self._RETENTION_MAX, v))
+
+    async def get_retention_settings(self) -> dict:
+        """读取日志保留天数（审核日志 / 成本日志），缺失或非法回退默认"""
+        audit = self._clamp_retention(
+            await self.get_setting("audit_log_retention_days")
+        )
+        cost = self._clamp_retention(
+            await self.get_setting("cost_log_retention_days")
+        )
+        return {
+            "audit_log_retention_days": audit,
+            "cost_log_retention_days": cost,
+        }
+
+    async def set_retention_settings(self, audit_days, cost_days) -> dict:
+        """写入日志保留天数（夹紧范围），返回实际生效值"""
+        a = self._clamp_retention(audit_days)
+        c = self._clamp_retention(cost_days)
+        await self.set_setting("audit_log_retention_days", str(a))
+        await self.set_setting("cost_log_retention_days", str(c))
+        return {"audit_log_retention_days": a, "cost_log_retention_days": c}
+
+    async def get_database_stats(self) -> dict:
+        """Dashboard 概览用：数据库本身的健康/体量统计（各表行数、文件体积、时间跨度、保留策略）"""
+        import logging
+
+        logger = logging.getLogger(__name__)
+        # 已知表（顺序即展示顺序）；逐表 COUNT 容错，缺表不影响其余统计
+        table_names = [
+            "audit_log",
+            "violation_records",
+            "user_profiles",
+            "user_violation_stats",
+            "image_hashes",
+            "manual_whitelist",
+            "manual_blacklist",
+            "account_whitelist",
+            "whitelist",
+            "blacklist",
+            "model_pricing",
+            "llm_cost_log",
+            "model_cost_total",
+        ]
+        empty = {
+            "tables": [],
+            "table_count": 0,
+            "total_rows": 0,
+            "db_path": self._db_path,
+            "db_size_bytes": 0,
+            "audit_oldest": None,
+            "audit_newest": None,
+            "cost_log_oldest": None,
+            "cost_log_newest": None,
+            "audit_retention_days": self._RETENTION_DEFAULT,
+            "cost_log_retention_days": self._RETENTION_DEFAULT,
+        }
+        await self._init_db()
+        try:
+            tables: list[dict] = []
+            total_rows = 0
+            retention = await self.get_retention_settings()
+            async with aiosqlite.connect(self._db_path) as conn:
+                cursor = await conn.cursor()
+                for name in table_names:
+                    try:
+                        row = await (
+                            await cursor.execute(
+                                f"SELECT COUNT(*) FROM {name}"  # noqa: S608  # 表名来自固定白名单
+                            )
+                        ).fetchone()
+                        cnt = row[0] if row and row[0] is not None else 0
+                    except aiosqlite.OperationalError:
+                        continue  # 表不存在（旧库 / 未启用功能）跳过
+                    tables.append({"name": name, "rows": cnt})
+                    total_rows += cnt
+
+                async def _range(table: str, col: str) -> tuple:
+                    try:
+                        r = await (
+                            await cursor.execute(
+                                f"SELECT MIN({col}), MAX({col}) FROM {table}"  # noqa: S608
+                            )
+                        ).fetchone()
+                        return (r[0], r[1]) if r else (None, None)
+                    except aiosqlite.OperationalError:
+                        return (None, None)
+
+                audit_oldest, audit_newest = await _range("audit_log", "created_at")
+                cost_oldest, cost_newest = await _range("llm_cost_log", "created_at")
+
+            # 数据库文件体积（含 -wal/-shm 旁路文件，反映真实磁盘占用）
+            db_size = 0
+            try:
+                if self._db_path and os.path.exists(self._db_path):
+                    db_size = os.path.getsize(self._db_path)
+                    for suffix in ("-wal", "-shm"):
+                        side = self._db_path + suffix
+                        if os.path.exists(side):
+                            db_size += os.path.getsize(side)
+            except OSError as e:
+                logger.debug(f"读取数据库文件体积失败: {e}")
+
+            return {
+                "tables": tables,
+                "table_count": len(tables),
+                "total_rows": total_rows,
+                "db_path": self._db_path,
+                "db_size_bytes": db_size,
+                "audit_oldest": audit_oldest,
+                "audit_newest": audit_newest,
+                "cost_log_oldest": cost_oldest,
+                "cost_log_newest": cost_newest,
+                "audit_retention_days": retention["audit_log_retention_days"],
+                "cost_log_retention_days": retention["cost_log_retention_days"],
+            }
+        except Exception as e:
+            logger.error(f"get_database_stats 失败: {e}")
             return empty
 
     async def get_group_violation_stats(self, group_id: str) -> dict:

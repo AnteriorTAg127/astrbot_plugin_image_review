@@ -23,7 +23,7 @@ from .utils import ImageUtils, MessageUtils
     "image_review",
     "AnteriorTAg127",
     "图片审核插件，提供图片内容审核、违规处理、管理群通知等功能",
-    "1.5.4",
+    "1.6.0",
 )
 class ImageReviewPlugin(Star):
     """图片审核插件主类"""
@@ -112,14 +112,20 @@ class ImageReviewPlugin(Star):
                 # 每天执行一次清理
                 await asyncio.sleep(24 * 60 * 60)  # 24小时
                 await self._db.clean_expired_list_entries()
-                # v1.5.0: 审核日志保留 30 天
-                deleted = await self._db.cleanup_audit_log(keep_days=30)
+                # v1.6.0：保留天数可在 WebUI 自定义（存 DB，每轮清理读取，改完下轮生效）
+                retention = await self._db.get_retention_settings()
+                audit_keep = retention["audit_log_retention_days"]
+                cost_keep = retention["cost_log_retention_days"]
+                deleted = await self._db.cleanup_audit_log(keep_days=audit_keep)
                 if deleted:
-                    logger.info(f"审核日志清理完成，删除 {deleted} 条过期记录")
-                # v1.5.4: LLM 成本日志保留 30 天
-                cost_deleted = await self._db.cleanup_cost_log(keep_days=30)
+                    logger.info(
+                        f"审核日志清理完成，删除 {deleted} 条过期记录（保留 {audit_keep} 天）"
+                    )
+                cost_deleted = await self._db.cleanup_cost_log(keep_days=cost_keep)
                 if cost_deleted:
-                    logger.info(f"成本日志清理完成，删除 {cost_deleted} 条过期记录")
+                    logger.info(
+                        f"成本日志清理完成，删除 {cost_deleted} 条过期记录（保留 {cost_keep} 天）"
+                    )
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -332,29 +338,41 @@ class ImageReviewPlugin(Star):
                 except Exception as e:
                     logger.error(f"处理图片异常: {e}")
 
-                # v1.5.4：成本记账（遍历本次审核中所有 LLM 调用，对其用量按配置单价算成本）
+                # v1.6.0：成本记账（遍历本次审核中所有 LLM 调用）。无论该模型是否已配置
+                # 单价都记录用量，使「所有被调用过的模型」都出现在成本概览；未配置单价者
+                # 以 0 价记账（仅累计 token / 调用次数），待用户在「成本配置」补价后再计成本。
                 audit_total_cost = 0.0
                 for upid, usage in usages:
-                    pricing = pricing_map.get(upid)
-                    if not usage or not pricing:
+                    if not usage:
                         continue
+                    pricing = pricing_map.get(upid)
+                    if pricing:
+                        currency = pricing["currency"]
+                        price_per = pricing["price_per"]
+                        in_price = pricing["input_price"]
+                        cached_price = pricing["cached_price"]
+                        out_price = pricing["output_price"]
+                    else:
+                        currency, price_per = "CNY", 1000000
+                        in_price = cached_price = out_price = 0.0
                     try:
                         await self._db.record_cost(
                             upid,
-                            pricing["currency"],
-                            pricing["price_per"],
-                            pricing["input_price"],
-                            pricing["cached_price"],
-                            pricing["output_price"],
+                            currency,
+                            price_per,
+                            in_price,
+                            cached_price,
+                            out_price,
                             usage.input_other,
                             usage.input_cached,
                             usage.output,
                         )
-                        audit_total_cost += (
-                            usage.input_other * pricing["input_price"]
-                            + usage.input_cached * pricing["cached_price"]
-                            + usage.output * pricing["output_price"]
-                        ) / pricing["price_per"]
+                        if pricing:
+                            audit_total_cost += (
+                                usage.input_other * in_price
+                                + usage.input_cached * cached_price
+                                + usage.output * out_price
+                            ) / price_per
                     except Exception as e:
                         logger.debug(f"记录 LLM 成本失败: {e}")
                 # 回写到当次审核日志（供审核日志列展示单次成本 + 概览均价）
