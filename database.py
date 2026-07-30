@@ -5,10 +5,29 @@
 
 import hashlib
 import os
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 
 import aiosqlite
+
+# ========== 时区策略（v1.6.x） ==========
+# 库内一律存 naive UTC；展示给前端时统一 +8 小时还原成本地。
+# 写入用 _utc_iso()；按「本地自然日」过滤/分组见各 SQL 的 date(<col>, _LOCAL_DAY)。
+_LOCAL_DAY = "+8 hours"  # 存量数据产生于 UTC+8 环境；展示与本地日换算偏移
+
+
+def _utc_now() -> datetime:
+    """当前 UTC 时间（naive，便于 SQLite 字符串存储与比较）。"""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _utc_iso() -> str:
+    """当前 UTC 时间的 naive 字符串（秒级、空格分隔，与 SQLite CURRENT_TIMESTAMP 同格式）。
+
+    统一格式可保证同列内字符串排序正确，且与存量迁移输出一致。
+    """
+    return _utc_now().strftime("%Y-%m-%d %H:%M:%S")
+
 
 # ========== WebUI 查询安全辅助（v1.5.0） ==========
 
@@ -89,6 +108,7 @@ class DatabaseManager:
         Args:
             data_dir: 数据存储目录
         """
+        self._data_dir = data_dir
         self._db_path = os.path.join(data_dir, "image_review.db")
         # 延迟初始化数据库，在首次使用时调用
         self._initialized = False
@@ -174,7 +194,8 @@ class DatabaseManager:
                     risk_reason TEXT,
                     violation_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     mute_duration INTEGER,
-                    message_id TEXT
+                    message_id TEXT,
+                    is_admin INTEGER NOT NULL DEFAULT 0
                 )
             """)
 
@@ -236,7 +257,8 @@ class DatabaseManager:
                     risk_reason TEXT,
                     source TEXT,
                     created_at TEXT,
-                    cost REAL DEFAULT 0
+                    cost REAL DEFAULT 0,
+                    is_admin INTEGER NOT NULL DEFAULT 0
                 )
             """)
 
@@ -370,6 +392,9 @@ class DatabaseManager:
         # v1.5.0 幂等迁移（独立连接）：名单表群级化 + 违规记录新列
         await self._migrate_v150()
 
+        # v1.6.x 幂等迁移：历史本地时间列转 UTC（统一时区，配合展示层 +8）
+        await self._migrate_timezone_utc()
+
     async def _migrate_v150(self):
         """v1.5.0 数据库迁移（幂等）
 
@@ -392,6 +417,7 @@ class DatabaseManager:
                 ("note", "TEXT DEFAULT ''"),
                 ("phash", "TEXT"),
                 ("dhash", "TEXT"),
+                ("is_admin", "INTEGER NOT NULL DEFAULT 0"),
             ):  # fmt: skip
                 try:
                     await cursor.execute(
@@ -407,11 +433,14 @@ class DatabaseManager:
 
             await conn.commit()
 
-        # v1.5.4 迁移：audit_log 增加 cost 列（独立连接，不依赖外层事务）
-        await self._migrate_audit_log_cost()
+        # audit_log 列迁移：cost(v1.5.4) + is_admin(v1.6.x)（独立连接，幂等）
+        await self._migrate_audit_log_columns()
 
-    async def _migrate_audit_log_cost(self):
-        """v1.5.4 迁移：为 audit_log 增加 cost 列（独立连接，用 PRAGMA 检测后 ALTER）"""
+    async def _migrate_audit_log_columns(self):
+        """audit_log 列迁移（独立连接，PRAGMA 检测后 ALTER，幂等）。
+
+        涵盖 cost(v1.5.4) 与 is_admin(v1.6.x) 两列；老库缺哪列补哪列。
+        """
         import logging
 
         logger = logging.getLogger(__name__)
@@ -420,14 +449,125 @@ class DatabaseManager:
                 cursor = await conn.cursor()
                 await cursor.execute("PRAGMA table_info(audit_log)")
                 cols = {row[1] for row in await cursor.fetchall()}
+                added: list[str] = []
                 if "cost" not in cols:
                     await cursor.execute(
                         "ALTER TABLE audit_log ADD COLUMN cost REAL DEFAULT 0"
                     )
+                    added.append("cost")
+                if "is_admin" not in cols:
+                    await cursor.execute(
+                        "ALTER TABLE audit_log ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0"
+                    )
+                    added.append("is_admin")
+                if added:
                     await conn.commit()
-                    logger.info("audit_log 迁移: 成功新增 cost 列")
+                    logger.info(f"audit_log 迁移: 成功新增列 {added}")
         except Exception as e:
-            logger.error(f"audit_log cost 列迁移失败: {e}")
+            logger.error(f"audit_log 列迁移失败: {e}")
+
+    def _backup_db_file(self, tag: str) -> bool:
+        """破坏性迁移前的文件级数据库备份（含 -wal/-shm），同 tag 幂等。
+
+        备份到 ``<插件数据目录>/backups/<db 文件名>.before-<tag>``（始终位于
+        插件自身数据目录下，不依赖 db 文件路径反推）。已存在则视为已备份，
+        直接成功；须在无任何 open 连接时调用以保证复制一致性。
+        备份失败返回 False（调用方应据此中止迁移，确保「无备份不迁移」）。
+        """
+        import logging
+        import shutil
+
+        logger = logging.getLogger(__name__)
+        if not self._db_path or not os.path.exists(self._db_path):
+            return True  # 首次初始化尚无 db 文件，无需备份
+        backup_dir = os.path.join(self._data_dir, "backups")
+        try:
+            os.makedirs(backup_dir, exist_ok=True)
+        except OSError as e:
+            logger.error(f"创建备份目录失败: {e}")
+            return False
+        marker = os.path.join(
+            backup_dir, f"{os.path.basename(self._db_path)}.before-{tag}"
+        )
+        if os.path.exists(marker):
+            return True  # 该迁移已备份过，幂等
+        try:
+            for suffix in ("", "-wal", "-shm"):
+                src = self._db_path + suffix
+                if os.path.exists(src):
+                    shutil.copy2(src, marker + suffix)
+            logger.info(f"升级前数据库已自动备份: {marker}")
+            return True
+        except OSError as e:
+            logger.error(f"数据库自动备份失败: {e}")
+            return False
+
+    async def _migrate_timezone_utc(self):
+        """启动时自动把历史「本地时间」列转为 UTC（−8h），使全库统一存 UTC。
+
+        仅迁移过去由 ``datetime.now()`` 写入的列；``CURRENT_TIMESTAMP`` 默认值
+        写入的列（violation_time、各名单表 created_at、user_violation_stats 的
+        last_violation_time）本就是 UTC，跳过。
+
+        流程：检查标志 →（首次）自动文件备份 → 单事务迁移 → 写标志。
+        备份失败则中止迁移（不写标志，下次启动重试），保证「无备份不迁移」，
+        使终端用户无需任何手动干预即可安全升级。假设存量数据产生于 UTC+8 环境
+        （与展示层 _LOCAL_DAY 一致）。表/列名来自固定白名单。
+        """
+        import logging
+
+        logger = logging.getLogger(__name__)
+        flag = "tz_utc_migrated_v1"
+        local_cols = [
+            ("audit_log", "created_at"),
+            ("llm_cost_log", "created_at"),
+            ("user_profiles", "first_seen_at"),
+            ("user_profiles", "last_seen_at"),
+            ("user_profiles", "updated_at"),
+            ("model_pricing", "updated_at"),
+            ("model_cost_total", "updated_at"),
+            ("plugin_settings", "updated_at"),
+            ("whitelist", "expires_at"),
+            ("blacklist", "expires_at"),
+            ("image_hashes", "expires_at"),
+        ]
+        try:
+            # 1) 检查是否已迁移（短连接，随即关闭，确保备份时无 open 连接）
+            async with aiosqlite.connect(self._db_path) as conn:
+                cursor = await conn.cursor()
+                await cursor.execute(
+                    "SELECT 1 FROM plugin_settings WHERE key = ?", (flag,)
+                )
+                if await cursor.fetchone():
+                    return  # 已迁移，幂等跳过
+            # 2) 首次迁移前自动备份；失败则中止，下次启动重试
+            if not self._backup_db_file(flag):
+                logger.error("时区迁移中止：升级前自动备份失败，请检查磁盘/权限后重启")
+                return
+            # 3) 执行迁移并写标志（单事务原子）
+            async with aiosqlite.connect(self._db_path) as conn:
+                cursor = await conn.cursor()
+                for table, col in local_cols:
+                    # 变量承载 f-string，避免 execute 直接拼接触发 SQL 注入告警；
+                    # table/col 均来自上方固定白名单，无注入风险。
+                    sql = (
+                        f"UPDATE {table} SET {col} = datetime({col}, '-8 hours') "
+                        f"WHERE {col} IS NOT NULL AND {col} != ''"
+                    )
+                    try:
+                        await cursor.execute(sql)
+                    except aiosqlite.OperationalError:
+                        continue  # 表/列不存在（旧库未启用该功能）跳过
+                await cursor.execute(
+                    "INSERT INTO plugin_settings (key, value, updated_at) "
+                    "VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET "
+                    "value=excluded.value, updated_at=excluded.updated_at",
+                    (flag, "1", _utc_iso()),
+                )
+                await conn.commit()
+                logger.info("时区迁移完成：历史本地时间列已 −8h 转为 UTC")
+        except Exception as e:
+            logger.error(f"时区迁移失败: {e}")
 
     async def _rebuild_manual_list_with_group(self, cursor, table: str):
         """为人工名单表增加 group_id 并重建唯一约束（幂等）。
@@ -567,7 +707,7 @@ class DatabaseManager:
             )
 
             # 检查是否过期
-            if expires_at and datetime.now() > datetime.fromisoformat(expires_at):
+            if expires_at and _utc_now() > datetime.fromisoformat(expires_at):
                 # 过期删除
                 logger.debug(f"白名单记录已过期，删除记录，ID: {record_id}")
                 await cursor.execute("DELETE FROM whitelist WHERE id = ?", (record_id,))
@@ -580,7 +720,7 @@ class DatabaseManager:
                 expire_hours = self._calculate_expire_hours(
                     new_hit_count, base_expire_hours, max_expire_days
                 )
-                new_expires_at = datetime.now() + timedelta(hours=expire_hours)
+                new_expires_at = _utc_now() + timedelta(hours=expire_hours)
                 logger.debug(
                     f"更新白名单命中次数，ID: {record_id}, 旧次数: {hit_count}, "
                     f"新次数: {new_hit_count}, 延长过期时间至: {new_expires_at}"
@@ -642,7 +782,7 @@ class DatabaseManager:
             )
 
             # 检查是否过期
-            if expires_at and datetime.now() > datetime.fromisoformat(expires_at):
+            if expires_at and _utc_now() > datetime.fromisoformat(expires_at):
                 # 过期删除
                 logger.debug(f"黑名单记录已过期，删除记录，ID: {record_id}")
                 await cursor.execute("DELETE FROM blacklist WHERE id = ?", (record_id,))
@@ -655,7 +795,7 @@ class DatabaseManager:
                 expire_hours = self._calculate_expire_hours(
                     new_hit_count, base_expire_hours, max_expire_days
                 )
-                new_expires_at = datetime.now() + timedelta(hours=expire_hours)
+                new_expires_at = _utc_now() + timedelta(hours=expire_hours)
                 logger.debug(
                     f"更新黑名单命中次数，ID: {record_id}, 旧次数: {hit_count}, "
                     f"新次数: {new_hit_count}, 延长过期时间至: {new_expires_at}"
@@ -716,7 +856,7 @@ class DatabaseManager:
                 expire_hours = base_expire_hours
                 logger.debug(f"白名单中不存在，设置基础过期时间: {expire_hours}小时")
 
-            expires_at = datetime.now() + timedelta(hours=expire_hours)
+            expires_at = _utc_now() + timedelta(hours=expire_hours)
             logger.debug(f"过期时间: {expires_at}")
 
             await cursor.execute(
@@ -775,7 +915,7 @@ class DatabaseManager:
                 expire_hours = base_expire_hours
                 logger.debug(f"黑名单中不存在，设置基础过期时间: {expire_hours}小时")
 
-            expires_at = datetime.now() + timedelta(hours=expire_hours)
+            expires_at = _utc_now() + timedelta(hours=expire_hours)
             logger.debug(f"过期时间: {expires_at}")
 
             await cursor.execute(
@@ -807,6 +947,8 @@ class DatabaseManager:
         evidence_path: str | None = None,
         phash: str | None = None,
         dhash: str | None = None,
+        is_admin: bool = False,
+        update_stats: bool = True,
     ):
         """
         记录违规信息
@@ -824,6 +966,10 @@ class DatabaseManager:
             evidence_path: 证据图片本地路径（v1.5.0，WebUI 展示用）
             phash: 感知哈希 pHash 十六进制（v1.5.2，WebUI 展示用，可选）
             dhash: 感知哈希 dHash 十六进制（v1.5.2，WebUI 展示用，可选）
+            is_admin: 发送者是否为管理员/群主（管理员违规仅通报不处罚，但仍写入
+                      违规记录留痕，WebUI 以徽章标注）
+            update_stats: 是否同步累加用户违规统计与档案计数。管理员留痕时传 False，
+                          使「记录留痕」之外的最终行为与历史完全一致（不计次、不禁言）。
         """
         import logging
 
@@ -841,8 +987,8 @@ class DatabaseManager:
             await cursor.execute(
                 """INSERT INTO violation_records
                    (user_id, group_id, md5_hash, image_url, risk_level, risk_reason,
-                    mute_duration, message_id, user_name, evidence_path, phash, dhash)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    mute_duration, message_id, user_name, evidence_path, phash, dhash, is_admin)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     user_id,
                     group_id,
@@ -856,32 +1002,36 @@ class DatabaseManager:
                     evidence_path,
                     phash,
                     dhash,
+                    1 if is_admin else 0,
                 ),
             )
             logger.debug("违规记录插入完成")
 
-            # 更新用户违规统计
-            logger.debug("更新用户违规统计")
-            await cursor.execute(
-                """INSERT INTO user_violation_stats (user_id, group_id, violation_count, last_violation_time, total_mute_duration)
-                   VALUES (?, ?, 1, CURRENT_TIMESTAMP, ?)
-                   ON CONFLICT(user_id, group_id) DO UPDATE SET
-                   violation_count = violation_count + 1,
-                   last_violation_time = CURRENT_TIMESTAMP,
-                   total_mute_duration = total_mute_duration + ?""",
-                (user_id, group_id, mute_duration or 0, mute_duration or 0),
-            )
-            logger.debug("用户违规统计更新完成")
+            # 更新用户违规统计（管理员留痕时 update_stats=False，跳过以保持行为不变）
+            if update_stats:
+                logger.debug("更新用户违规统计")
+                await cursor.execute(
+                    """INSERT INTO user_violation_stats (user_id, group_id, violation_count, last_violation_time, total_mute_duration)
+                       VALUES (?, ?, 1, CURRENT_TIMESTAMP, ?)
+                       ON CONFLICT(user_id, group_id) DO UPDATE SET
+                       violation_count = violation_count + 1,
+                       last_violation_time = CURRENT_TIMESTAMP,
+                       total_mute_duration = total_mute_duration + ?""",
+                    (user_id, group_id, mute_duration or 0, mute_duration or 0),
+                )
+                logger.debug("用户违规统计更新完成")
 
             await conn.commit()
             logger.debug("违规信息记录完成")
 
         # 更新用户违规档案（v1.5.0）：upsert + 全局违规计数 +1
-        try:
-            await self.upsert_user_profile(user_id, user_name, group_id)
-            await self.inc_user_violation_count(user_id)
-        except Exception as e:
-            logger.error(f"更新用户违规档案失败: {e}")
+        # 管理员留痕时 update_stats=False，跳过以免档案违规计数被累加（行为不变）
+        if update_stats:
+            try:
+                await self.upsert_user_profile(user_id, user_name, group_id)
+                await self.inc_user_violation_count(user_id)
+            except Exception as e:
+                logger.error(f"更新用户违规档案失败: {e}")
 
     async def get_user_violation_count(self, user_id: str, group_id: str) -> int:
         """
@@ -987,7 +1137,7 @@ class DatabaseManager:
 
         async with aiosqlite.connect(self._db_path) as conn:
             cursor = await conn.cursor()
-            now = datetime.now().isoformat()
+            now = _utc_iso()
             await cursor.execute("DELETE FROM whitelist WHERE expires_at < ?", (now,))
             await cursor.execute("DELETE FROM blacklist WHERE expires_at < ?", (now,))
             await cursor.execute(
@@ -1063,7 +1213,7 @@ class DatabaseManager:
             else:
                 expire_hours = base_expire_hours
 
-            expires_at = datetime.now() + timedelta(hours=expire_hours)
+            expires_at = _utc_now() + timedelta(hours=expire_hours)
             risk_level_value = risk_level.value if risk_level else None
 
             await cursor.execute(
@@ -1117,7 +1267,7 @@ class DatabaseManager:
             cursor = await conn.cursor()
 
             # 获取所有未过期的哈希记录
-            now = datetime.now().isoformat()
+            now = _utc_iso()
             hash_column = "phash" if hash_type == "phash" else "dhash"
 
             await cursor.execute(
@@ -1465,6 +1615,7 @@ class DatabaseManager:
         risk_level: RiskLevel,
         risk_reason: str,
         source: str = "",
+        is_admin: bool = False,
     ) -> int | None:
         """
         记录一次图片审核结果（无论通过与否），并更新用户档案活跃时间
@@ -1477,6 +1628,7 @@ class DatabaseManager:
             risk_level: 风险等级
             risk_reason: 风险原因（LLM 分析结论）
             source: 审核来源（如 Aliyun / VLAI / cache）
+            is_admin: 发送者是否为管理员/群主（供 WebUI 标注，与违规记录口径一致）
 
         Returns:
             插入的 audit_log 行 id，失败返回 None
@@ -1491,8 +1643,8 @@ class DatabaseManager:
                 cursor = await conn.cursor()
                 await cursor.execute(
                     """INSERT INTO audit_log
-                       (group_id, user_id, user_name, md5_hash, risk_level, risk_reason, source, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                       (group_id, user_id, user_name, md5_hash, risk_level, risk_reason, source, created_at, is_admin)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         group_id,
                         user_id,
@@ -1501,7 +1653,8 @@ class DatabaseManager:
                         risk_level.value,
                         risk_reason,
                         source,
-                        datetime.now().isoformat(),
+                        _utc_iso(),
+                        1 if is_admin else 0,
                     ),
                 )
                 row_id = cursor.lastrowid
@@ -1557,7 +1710,7 @@ class DatabaseManager:
         logger = logging.getLogger(__name__)
         await self._init_db()
         try:
-            cutoff = (datetime.now() - timedelta(days=keep_days)).isoformat()
+            cutoff = (_utc_now() - timedelta(days=keep_days)).isoformat()
             async with aiosqlite.connect(self._db_path) as conn:
                 cursor = await conn.cursor()
                 await cursor.execute(
@@ -1581,7 +1734,7 @@ class DatabaseManager:
         import json
 
         await self._init_db()
-        now_iso = datetime.now().isoformat()
+        now_iso = _utc_iso()
         async with aiosqlite.connect(self._db_path) as conn:
             cursor = await conn.cursor()
             await cursor.execute(
@@ -1624,7 +1777,7 @@ class DatabaseManager:
                 """UPDATE user_profiles
                    SET violation_count = violation_count + 1, updated_at = ?
                    WHERE user_id = ?""",
-                (datetime.now().isoformat(), user_id),
+                (_utc_iso(), user_id),
             )
             await conn.commit()
 
@@ -1642,7 +1795,7 @@ class DatabaseManager:
             """UPDATE user_profiles SET violation_count = (
                    SELECT COUNT(*) FROM violation_records WHERE user_id = ?
                ), updated_at = ? WHERE user_id = ?""",
-            (user_id, datetime.now().isoformat(), user_id),
+            (user_id, _utc_iso(), user_id),
         )
 
     # ========== WebUI：违规记录查询与 CRUD ==========
@@ -1688,10 +1841,10 @@ class DatabaseManager:
             like = f"%{escaped}%"
             params.extend([like, like])
         if date_from:
-            clauses.append("date(violation_time) >= date(?)")
+            clauses.append("date(violation_time, '+8 hours') >= date(?)")
             params.append(date_from)
         if date_to:
-            clauses.append("date(violation_time) <= date(?)")
+            clauses.append("date(violation_time, '+8 hours') <= date(?)")
             params.append(date_to)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         order_clause = _build_order_clause(
@@ -1860,10 +2013,10 @@ class DatabaseManager:
             like = f"%{escaped}%"
             params.extend([like, like])
         if date_from:
-            clauses.append("date(created_at) >= date(?)")
+            clauses.append("date(created_at, '+8 hours') >= date(?)")
             params.append(date_from)
         if date_to:
-            clauses.append("date(created_at) <= date(?)")
+            clauses.append("date(created_at, '+8 hours') <= date(?)")
             params.append(date_to)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         order_clause = _build_order_clause(
@@ -2045,16 +2198,16 @@ class DatabaseManager:
             clauses.append("status = ?")
             params.append(status)
         if first_seen_from:
-            clauses.append("date(first_seen_at) >= date(?)")
+            clauses.append("date(first_seen_at, '+8 hours') >= date(?)")
             params.append(first_seen_from)
         if first_seen_to:
-            clauses.append("date(first_seen_at) <= date(?)")
+            clauses.append("date(first_seen_at, '+8 hours') <= date(?)")
             params.append(first_seen_to)
         if last_seen_from:
-            clauses.append("date(last_seen_at) >= date(?)")
+            clauses.append("date(last_seen_at, '+8 hours') >= date(?)")
             params.append(last_seen_from)
         if last_seen_to:
-            clauses.append("date(last_seen_at) <= date(?)")
+            clauses.append("date(last_seen_at, '+8 hours') <= date(?)")
             params.append(last_seen_to)
         if groups:
             if isinstance(groups, str):
@@ -2123,7 +2276,7 @@ class DatabaseManager:
             group_ids_json = group_ids_val or "[]"
         else:
             group_ids_json = "[]"
-        now_iso = datetime.now().isoformat()
+        now_iso = _utc_iso()
         await self._init_db()
         try:
             async with aiosqlite.connect(self._db_path) as conn:
@@ -2169,7 +2322,7 @@ class DatabaseManager:
                 filtered[k] = v
         if not filtered:
             return False
-        filtered["updated_at"] = datetime.now().isoformat()
+        filtered["updated_at"] = _utc_iso()
         await self._init_db()
         async with aiosqlite.connect(self._db_path) as conn:
             cursor = await conn.cursor()
@@ -2343,7 +2496,7 @@ class DatabaseManager:
                     data.get("cached_price", 0),
                     data.get("output_price", 0),
                     data.get("label", ""),
-                    datetime.now().isoformat(),
+                    _utc_iso(),
                 ),
             )
             await conn.commit()
@@ -2399,7 +2552,7 @@ class DatabaseManager:
             + input_cached * cached_price
             + output * output_price
         ) / price_per
-        now = datetime.now().isoformat()
+        now = _utc_iso()
         await self._init_db()
         async with aiosqlite.connect(self._db_path) as conn:
             cursor = await conn.cursor()
@@ -2477,8 +2630,8 @@ class DatabaseManager:
                 today = date.today()
                 start = (today - timedelta(days=6)).isoformat()
                 await cursor.execute(
-                    "SELECT date(created_at) AS d, SUM(cost) AS c FROM llm_cost_log "
-                    "WHERE date(created_at) >= date(?) GROUP BY d",
+                    "SELECT date(created_at, '+8 hours') AS d, SUM(cost) AS c FROM llm_cost_log "
+                    "WHERE date(created_at, '+8 hours') >= date(?) GROUP BY d",
                     (start,),
                 )
                 cost_map = {
@@ -2504,7 +2657,7 @@ class DatabaseManager:
         logger = logging.getLogger(__name__)
         await self._init_db()
         try:
-            cutoff = (datetime.now() - timedelta(days=keep_days)).isoformat()
+            cutoff = (_utc_now() - timedelta(days=keep_days)).isoformat()
             async with aiosqlite.connect(self._db_path) as conn:
                 cursor = await conn.cursor()
                 await cursor.execute(
@@ -2548,12 +2701,12 @@ class DatabaseManager:
                     return row[0] if row and row[0] is not None else 0
 
                 today_audits = await _scalar(
-                    "SELECT COUNT(*) FROM audit_log WHERE date(created_at) >= date(?)",
+                    "SELECT COUNT(*) FROM audit_log WHERE date(created_at, '+8 hours') >= date(?)",
                     (today_str,),
                 )
                 today_violations = await _scalar(
                     "SELECT COUNT(*) FROM violation_records "
-                    "WHERE date(violation_time) >= date(?)",
+                    "WHERE date(violation_time, '+8 hours') >= date(?)",
                     (today_str,),
                 )
                 total_audits = await _scalar("SELECT COUNT(*) FROM audit_log")
@@ -2584,14 +2737,14 @@ class DatabaseManager:
                 today = date.today()
                 start_str = (today - timedelta(days=6)).isoformat()
                 await cursor.execute(
-                    "SELECT date(created_at) AS d, COUNT(*) AS c FROM audit_log "
-                    "WHERE date(created_at) >= date(?) GROUP BY d",
+                    "SELECT date(created_at, '+8 hours') AS d, COUNT(*) AS c FROM audit_log "
+                    "WHERE date(created_at, '+8 hours') >= date(?) GROUP BY d",
                     (start_str,),
                 )
                 audit_counts = {r["d"]: r["c"] for r in await cursor.fetchall()}
                 await cursor.execute(
-                    "SELECT date(violation_time) AS d, COUNT(*) AS c FROM violation_records "
-                    "WHERE date(violation_time) >= date(?) GROUP BY d",
+                    "SELECT date(violation_time, '+8 hours') AS d, COUNT(*) AS c FROM violation_records "
+                    "WHERE date(violation_time, '+8 hours') >= date(?) GROUP BY d",
                     (start_str,),
                 )
                 viol_counts = {r["d"]: r["c"] for r in await cursor.fetchall()}
@@ -2673,7 +2826,7 @@ class DatabaseManager:
                    VALUES (?, ?, ?)
                    ON CONFLICT(key) DO UPDATE SET
                    value=excluded.value, updated_at=excluded.updated_at""",
-                (key, value, datetime.now().isoformat()),
+                (key, value, _utc_iso()),
             )
             await conn.commit()
             return cursor.rowcount > 0
@@ -2822,7 +2975,7 @@ class DatabaseManager:
                 await (
                     await cursor.execute(
                         "SELECT COUNT(*) FROM violation_records "
-                        "WHERE group_id = ? AND date(violation_time) >= date(?)",
+                        "WHERE group_id = ? AND date(violation_time, '+8 hours') >= date(?)",
                         (group_id, today_str),
                     )
                 ).fetchone()
@@ -2831,7 +2984,7 @@ class DatabaseManager:
                 await (
                     await cursor.execute(
                         "SELECT COUNT(*) FROM audit_log "
-                        "WHERE group_id = ? AND date(created_at) >= date(?)",
+                        "WHERE group_id = ? AND date(created_at, '+8 hours') >= date(?)",
                         (group_id, today_str),
                     )
                 ).fetchone()

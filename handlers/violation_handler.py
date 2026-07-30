@@ -91,8 +91,27 @@ class ViolationHandler:
             # 检查用户是否为管理员或群主
             is_admin = await self._admin_manager.is_user_admin(event, group_id, user_id)
             if is_admin:
-                logger.info(f"用户 {user_id} 是管理员/群主，仅通知管理群，不执行处罚")
-                # 对管理员只通知，不记录违规、不禁言、不撤回
+                logger.info(f"用户 {user_id} 是管理员/群主，记录违规留痕但不执行处罚")
+                # 管理员/群主：不撤回、不禁言，但仍写入违规记录留痕（标注 is_admin），
+                # 使 WebUI 完整反映每一次违规判定（修复历史遗漏：旧逻辑此处直接 return，
+                # 导致管理员违规只进了审核日志、未进违规记录表）。
+                await self._db.record_violation(
+                    user_id=user_id,
+                    group_id=group_id,
+                    md5_hash=md5_hash,
+                    image_url=image_url,
+                    risk_level=risk_level,
+                    risk_reason=risk_reason,
+                    mute_duration=0,
+                    message_id=message_id,
+                    user_name=user_name,
+                    evidence_path=evidence_path,
+                    phash=phash,
+                    dhash=dhash,
+                    is_admin=True,
+                    update_stats=False,
+                )
+                # 对管理员只通知管理群，不执行处罚；violation_count 保持 0，与历史行为一致
                 await self._notify_manage_group(
                     event,
                     group_id,
@@ -109,7 +128,7 @@ class ViolationHandler:
                     auto_mute=group_config.get("auto_mute", True),
                     evidence_path=evidence_path,
                 )
-                logger.info(f"管理员违规通知已发送: 用户={user_id}, 群={group_id}")
+                logger.info(f"管理员违规已记录并通知: 用户={user_id}, 群={group_id}")
                 return
 
             # 1. 自动撤回违规图片

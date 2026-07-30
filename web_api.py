@@ -19,11 +19,13 @@ from __future__ import annotations
 
 import base64
 import os
+from datetime import datetime, timedelta
 from io import BytesIO
 from typing import TYPE_CHECKING, Any
 
 from astrbot.api import logger
-from astrbot.api.web import error_response, json_response, request
+from astrbot.api.web import error_response, request
+from astrbot.api.web import json_response as _raw_json_response
 
 from .database import DatabaseManager, RiskLevel
 
@@ -40,6 +42,53 @@ _MAX_PAGE_SIZE = 100
 
 # 合法十六进制字符集（md5_hash 校验用）
 _HEX_CHARS = frozenset("0123456789abcdefABCDEF")
+
+# 展示层时区换算：库内时间统一存 naive UTC，返回前端前 +8 还原本地。
+# 仅对已知时间字段名生效；趋势图的 "date" 键是 SQL 已换算的本地日，不在其中。
+_TS_FIELDS = frozenset(
+    {
+        "violation_time",
+        "created_at",
+        "first_seen_at",
+        "last_seen_at",
+        "updated_at",
+        "expires_at",
+        "audit_oldest",
+        "audit_newest",
+        "cost_log_oldest",
+        "cost_log_newest",
+    }
+)
+
+
+def _to_local_ts(v: Any) -> Any:
+    """naive UTC 时间字符串 +8h 还原本地；非字符串/空/带时区/解析失败原样返回。"""
+    if not isinstance(v, str) or not v:
+        return v
+    try:
+        dt = datetime.fromisoformat(v)
+    except ValueError:
+        return v
+    if dt.tzinfo is not None:
+        return v  # 已带时区信息，不再偏移
+    return (dt + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _localize(obj: Any) -> Any:
+    """递归把响应结构里 _TS_FIELDS 命中的时间字段从 UTC 还原本地。"""
+    if isinstance(obj, dict):
+        return {
+            k: (_to_local_ts(v) if k in _TS_FIELDS else _localize(v))
+            for k, v in obj.items()
+        }
+    if isinstance(obj, list):
+        return [_localize(x) for x in obj]
+    return obj
+
+
+def json_response(data: Any) -> Any:
+    """包装框架 json_response：序列化前把 UTC 时间字段 +8 还原本地（提取后 +8）。"""
+    return _raw_json_response(_localize(data))
 
 
 def _current_user() -> str:
@@ -117,6 +166,7 @@ def _sanitize_violation(item: dict) -> dict:
     """违规记录安全处理：evidence_path 替换为布尔 has_evidence，不向前端泄露服务器路径。"""
     sanitized = dict(item)
     sanitized["has_evidence"] = bool(sanitized.pop("evidence_path", None))
+    sanitized["is_admin"] = bool(sanitized.get("is_admin"))
     return sanitized
 
 

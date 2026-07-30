@@ -293,7 +293,14 @@ class ImageReviewPlugin(Star):
                     )
 
                     # 记录审核日志（无论结果如何，供 WebUI 统计与浏览，v1.5.0）
+                    # 一并记录管理员身份，使审核日志与违规记录的管理员标注口径一致
                     audit_id = None
+                    try:
+                        audit_is_admin = await self._admin_manager.is_user_admin(
+                            event, group_id, user_id
+                        )
+                    except Exception:
+                        audit_is_admin = False
                     try:
                         audit_id = await self._db.record_audit(
                             group_id,
@@ -303,6 +310,7 @@ class ImageReviewPlugin(Star):
                             risk_level,
                             risk_reason,
                             source=self._config.get("image_censor_provider", "Aliyun"),
+                            is_admin=audit_is_admin,
                         )
                     except Exception as e:
                         logger.error(f"记录审核日志异常: {e}")

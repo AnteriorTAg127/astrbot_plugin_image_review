@@ -1196,7 +1196,15 @@ tbody tr:last-child td { border-bottom: none; }
           var tdId = el("td", { text: String(row.id) }); tdId.setAttribute("data-label", "ID"); tr.appendChild(tdId);
           var tdT = el("td", { text: fmtTime(row.violation_time) }); tdT.setAttribute("data-label", "时间"); tr.appendChild(tdT);
           var tdG = el("td", { text: row.group_id || "-" }); tdG.setAttribute("data-label", "群"); tr.appendChild(tdG);
-          var tdU = el("td", { text: (row.user_name || "") + " (" + (row.user_id || "") + ")" }); tdU.setAttribute("data-label", "用户"); tr.appendChild(tdU);
+          var tdU = el("td"); tdU.setAttribute("data-label", "用户");
+          tdU.appendChild(document.createTextNode((row.user_name || "") + " (" + (row.user_id || "") + ")"));
+          if (row.is_admin) {
+            var badgeAdmin = el("span", { class: "badge badge-info", text: "管理员" });
+            badgeAdmin.style.marginLeft = "6px";
+            badgeAdmin.setAttribute("title", "管理员/群主：仅通报，未执行撤回/禁言");
+            tdU.appendChild(badgeAdmin);
+          }
+          tr.appendChild(tdU);
           var tdR = el("td"); tdR.setAttribute("data-label", "风险等级");
           var rInfo = riskBadgeInfo(row.risk_level);
           tdR.appendChild(el("span", { class: "badge " + rInfo.cls, text: rInfo.text }));
@@ -1224,7 +1232,8 @@ tbody tr:last-child td { border-bottom: none; }
           }
           tr.appendChild(tdHash);
           var mute = parseInt(row.mute_duration, 10) || 0;
-          var tdM = el("td", { text: mute > 0 ? ("禁言" + mute + "s") : "-" }); tdM.setAttribute("data-label", "处理措施"); tr.appendChild(tdM);
+          var muteText = row.is_admin ? "未处罚(管理员)" : (mute > 0 ? ("禁言" + mute + "s") : "-");
+          var tdM = el("td", { text: muteText }); tdM.setAttribute("data-label", "处理措施"); tr.appendChild(tdM);
           var tdN = el("td", { text: row.note || "-" }); tdN.setAttribute("data-label", "备注"); tr.appendChild(tdN);
           // 图片列：有证据时提供「查看」按钮
           var tdImg = el("td"); tdImg.setAttribute("data-label", "图片");
@@ -1308,6 +1317,7 @@ tbody tr:last-child td { border-bottom: none; }
     box.appendChild(detailRow("时间", fmtTime(row.violation_time)));
     box.appendChild(detailRow("群号", row.group_id || ""));
     box.appendChild(detailRow("用户", (row.user_name || "") + " (" + (row.user_id || "") + ")"));
+    box.appendChild(detailRow("身份", row.is_admin ? "管理员/群主（仅通报，未执行撤回/禁言）" : "普通成员"));
     var rInfo = riskBadgeInfo(row.risk_level);
     box.appendChild(detailRow("风险等级", rInfo.text + " (" + (row.risk_level == null ? "" : row.risk_level) + ")"));
     box.appendChild(detailRow("LLM 分析", row.risk_reason || ""));
@@ -1477,7 +1487,15 @@ tbody tr:last-child td { border-bottom: none; }
           var tdId = el("td", { text: String(row.id) }); tdId.setAttribute("data-label", "ID"); tr.appendChild(tdId);
           var tdT = el("td", { text: fmtTime(row.created_at) }); tdT.setAttribute("data-label", "时间"); tr.appendChild(tdT);
           var tdG = el("td", { text: row.group_id || "-" }); tdG.setAttribute("data-label", "群"); tr.appendChild(tdG);
-          var tdU = el("td", { text: (row.user_name || "") + " (" + (row.user_id || "") + ")" }); tdU.setAttribute("data-label", "用户"); tr.appendChild(tdU);
+          var tdU = el("td"); tdU.setAttribute("data-label", "用户");
+          tdU.appendChild(document.createTextNode((row.user_name || "") + " (" + (row.user_id || "") + ")"));
+          if (row.is_admin) {
+            var badgeAdminAudit = el("span", { class: "badge badge-info", text: "管理员" });
+            badgeAdminAudit.style.marginLeft = "6px";
+            badgeAdminAudit.setAttribute("title", "管理员/群主");
+            tdU.appendChild(badgeAdminAudit);
+          }
+          tr.appendChild(tdU);
           var tdMd5 = el("td", { class: "preview", text: truncate(row.md5_hash || "", 12) || "-" });
           tdMd5.setAttribute("data-label", "MD5");
           tdMd5.setAttribute("title", row.md5_hash || "");
@@ -1535,6 +1553,7 @@ tbody tr:last-child td { border-bottom: none; }
     box.appendChild(detailRow("时间", fmtTime(row.created_at)));
     box.appendChild(detailRow("群号", row.group_id || ""));
     box.appendChild(detailRow("用户", (row.user_name || "") + " (" + (row.user_id || "") + ")"));
+    box.appendChild(detailRow("身份", row.is_admin ? "管理员/群主" : "普通成员"));
     box.appendChild(detailRow("MD5", row.md5_hash || ""));
     var rInfo = riskBadgeInfo(row.risk_level);
     box.appendChild(detailRow("风险等级", rInfo.text + " (" + (row.risk_level == null ? "" : row.risk_level) + ")"));
