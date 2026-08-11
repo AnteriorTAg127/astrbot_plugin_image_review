@@ -64,7 +64,11 @@ class ViolationHandler:
         dhash: str | None = None,
     ) -> None:
         """
-        处理违规图片
+        处理单个违规图片（处罚+记录+单张通报）
+
+        签名与行为保持 v1.6.0 兼容：处罚/记录逻辑见 _process_violation，
+        单张通报逻辑见 _notify_manage_group。同一消息事件内的多个违规请使用
+        handle_violations_batch（v1.6.1 起合并为一次通报）。
 
         Args:
             event: 消息事件
@@ -76,12 +80,90 @@ class ViolationHandler:
             risk_level: 风险等级
             risk_reason: 风险原因
             message_id: 消息ID
+            image_data: 已下载的图片数据（可选）
+            phash: 感知哈希（可选）
+            dhash: 差异哈希（可选）
+        """
+        result = await self._process_violation(
+            event,
+            group_id,
+            user_id,
+            user_name,
+            md5_hash,
+            image_url,
+            risk_level,
+            risk_reason,
+            message_id,
+            image_data=image_data,
+            phash=phash,
+            dhash=dhash,
+        )
+        if result is None:
+            return
+        group_config = self._config_manager.get_group_config(group_id)
+        await self._notify_manage_group(
+            event,
+            group_id,
+            user_id,
+            user_name,
+            md5_hash,
+            image_url,
+            risk_level,
+            risk_reason,
+            mute_duration=result["mute_duration"],
+            violation_count=result["violation_count"],
+            is_admin=result["is_admin"],
+            auto_recall=group_config.get("auto_recall", True),
+            auto_mute=group_config.get("auto_mute", True),
+            evidence_path=result["evidence_path"],
+        )
+
+    async def _process_violation(
+        self,
+        event: AstrMessageEvent,
+        group_id: str,
+        user_id: str,
+        user_name: str,
+        md5_hash: str,
+        image_url: str,
+        risk_level: RiskLevel,
+        risk_reason: str,
+        message_id: str,
+        image_data: bytes | None = None,
+        phash: str | None = None,
+        dhash: str | None = None,
+        recall_message: bool = True,
+    ) -> dict | None:
+        """
+        单张违规的处罚与记录（不含通报），v1.6.1 抽出供单张/批量共用
+
+        处理顺序：保存证据 → 管理员留痕分支 → 撤回（可跳过）→ 禁言计算与执行 →
+        写入违规记录。
+
+        Args:
+            event: 消息事件
+            group_id: 群ID
+            user_id: 用户ID
+            user_name: 用户名
+            md5_hash: 图片MD5
+            image_url: 图片URL
+            risk_level: 风险等级
+            risk_reason: 风险原因
+            message_id: 消息ID
+            image_data: 已下载的图片数据（可选）
+            phash: 感知哈希（可选）
+            dhash: 差异哈希（可选）
+            recall_message: 是否执行撤回（批量处理同一条消息时仅首次撤回）
+
+        Returns:
+            dict(is_admin, mute_duration, violation_count, evidence_path, recalled)；
+            群配置缺失等无法处理时返回 None
         """
         try:
             # 获取该群的配置
             group_config = self._config_manager.get_group_config(group_id)
             if not group_config:
-                return
+                return None
 
             # 0. 保存证据图片（无论是否有管理群都保存，供 WebUI 展示，v1.5.0）
             evidence_path = await self._download_evidence_image(
@@ -111,29 +193,20 @@ class ViolationHandler:
                     is_admin=True,
                     update_stats=False,
                 )
-                # 对管理员只通知管理群，不执行处罚；violation_count 保持 0，与历史行为一致
-                await self._notify_manage_group(
-                    event,
-                    group_id,
-                    user_id,
-                    user_name,
-                    md5_hash,
-                    image_url,
-                    risk_level,
-                    risk_reason,
-                    mute_duration=0,
-                    violation_count=0,
-                    is_admin=True,
-                    auto_recall=group_config.get("auto_recall", True),
-                    auto_mute=group_config.get("auto_mute", True),
-                    evidence_path=evidence_path,
-                )
-                logger.info(f"管理员违规已记录并通知: 用户={user_id}, 群={group_id}")
-                return
+                logger.info(f"管理员违规已记录留痕: 用户={user_id}, 群={group_id}")
+                return {
+                    "is_admin": True,
+                    "mute_duration": 0,
+                    "violation_count": 0,
+                    "evidence_path": evidence_path,
+                    "recalled": False,
+                }
 
-            # 1. 自动撤回违规图片
-            if group_config.get("auto_recall", True):
+            # 1. 自动撤回违规图片（批量处理同一条消息时仅首次执行）
+            recalled = False
+            if recall_message and group_config.get("auto_recall", True):
                 await self._recall_message(event, message_id)
+                recalled = True
 
             # 2. 计算禁言时长
             violation_count = await self._db.get_user_violation_count(user_id, group_id)
@@ -170,30 +243,134 @@ class ViolationHandler:
             # 违规次数+1（因为刚记录的违规）
             violation_count += 1
 
-            # 5. 发送到管理群
-            await self._notify_manage_group(
-                event,
-                group_id,
-                user_id,
-                user_name,
-                md5_hash,
-                image_url,
-                risk_level,
-                risk_reason,
-                mute_duration,
-                violation_count,
-                auto_recall=group_config.get("auto_recall", True),
-                auto_mute=group_config.get("auto_mute", True),
-                evidence_path=evidence_path,
-            )
-
             logger.info(
                 f"处理违规图片: 用户={user_id}, 群={group_id}, "
                 f"风险等级={risk_level.name}, 禁言={mute_duration}秒"
             )
 
+            return {
+                "is_admin": False,
+                "mute_duration": mute_duration,
+                "violation_count": violation_count,
+                "evidence_path": evidence_path,
+                "recalled": recalled,
+            }
+
         except Exception as e:
             logger.error(f"处理违规图片异常: {e}")
+            return None
+
+    async def handle_violations_batch(
+        self,
+        event: AstrMessageEvent,
+        group_id: str,
+        user_id: str,
+        user_name: str,
+        message_id: str,
+        items: list[dict],
+    ) -> None:
+        """
+        批量处理同一消息事件内的多个违规图片（v1.6.1）
+
+        用于修复：合并转发消息内多张违规图片被逐张通报、管理群刷屏的问题。
+        处罚与记录仍逐张执行（撤回去重：同一条消息只撤回一次）；
+        通报只发一条——单张走与 handle_violation 一致的旧格式，
+        多张走 _notify_manage_group_batch 的汇总格式。
+
+        Args:
+            event: 消息事件
+            group_id: 群ID
+            user_id: 用户ID
+            user_name: 用户名
+            message_id: 消息ID
+            items: 违规图片列表，每项为 dict，含:
+                md5_hash(str)、image_url(str)、risk_level(RiskLevel)、
+                risk_reason(str)、image_data(bytes|None)、phash(str|None)、dhash(str|None)
+        """
+        if not items:
+            return
+        try:
+            group_config = self._config_manager.get_group_config(group_id)
+            if not group_config:
+                return
+            auto_recall = group_config.get("auto_recall", True)
+            auto_mute = group_config.get("auto_mute", True)
+
+            results: list[tuple[dict, dict]] = []
+            recall_done = False
+            for item in items:
+                result = await self._process_violation(
+                    event,
+                    group_id,
+                    user_id,
+                    user_name,
+                    item["md5_hash"],
+                    item["image_url"],
+                    item["risk_level"],
+                    item["risk_reason"],
+                    message_id,
+                    image_data=item.get("image_data"),
+                    phash=item.get("phash"),
+                    dhash=item.get("dhash"),
+                    recall_message=auto_recall and not recall_done,
+                )
+                if result is None:
+                    continue
+                if result["recalled"]:
+                    recall_done = True
+                results.append((item, result))
+
+            if not results:
+                return
+
+            # 单张：与 v1.6.0 完全一致的通报格式
+            if len(results) == 1:
+                item, result = results[0]
+                await self._notify_manage_group(
+                    event,
+                    group_id,
+                    user_id,
+                    user_name,
+                    item["md5_hash"],
+                    item["image_url"],
+                    item["risk_level"],
+                    item["risk_reason"],
+                    mute_duration=result["mute_duration"],
+                    violation_count=result["violation_count"],
+                    is_admin=result["is_admin"],
+                    auto_recall=auto_recall,
+                    auto_mute=auto_mute,
+                    evidence_path=result["evidence_path"],
+                )
+                return
+
+            # 多张：一次汇总通报（禁言时长/违规次数取最后一张的处理结果，
+            # 与现状逐张处理时通报内容一致——禁言时长随违规次数递增而变长）
+            _, last_result = results[-1]
+            await self._notify_manage_group_batch(
+                event,
+                group_id,
+                user_id,
+                user_name,
+                [
+                    (
+                        item["md5_hash"],
+                        item["image_url"],
+                        item["risk_level"],
+                        item["risk_reason"],
+                        result["evidence_path"],
+                    )
+                    for item, result in results
+                ],
+                mute_duration=last_result["mute_duration"],
+                violation_count=last_result["violation_count"],
+                is_admin=last_result["is_admin"],
+                auto_recall=auto_recall,
+                auto_mute=auto_mute,
+            )
+
+        except Exception as e:
+            logger.error(f"批量处理违规图片异常: {e}")
 
     async def _recall_message(self, event: AstrMessageEvent, message_id: str) -> None:
         """
@@ -288,26 +465,9 @@ class ViolationHandler:
             if not manage_group_id:
                 return
 
-            # 格式化处理措施
-            if is_admin:
-                action_str = "无（管理员/群主身份，不执行处罚）"
-            else:
-                recall_str = "撤回图片" if auto_recall else "未开启撤回"
-                if auto_mute and mute_duration > 0:
-                    if mute_duration < 60:
-                        mute_str = f"{mute_duration}秒"
-                    elif mute_duration < 3600:
-                        mute_str = f"{mute_duration // 60}分钟"
-                    elif mute_duration < 86400:
-                        mute_str = f"{mute_duration // 3600}小时"
-                    else:
-                        mute_str = f"{mute_duration // 86400}天"
-                    mute_str = f"禁言{mute_str}"
-                elif auto_mute:
-                    mute_str = "禁言0秒"
-                else:
-                    mute_str = "未开启禁言"
-                action_str = f"{recall_str}+{mute_str}"
+            action_str = self._build_action_str(
+                is_admin, auto_recall, auto_mute, mute_duration
+            )
 
             # 构建违规信息（新格式）
             evidence_path_str = (
@@ -328,51 +488,171 @@ class ViolationHandler:
             )
 
             # 构建合并转发消息
-            nodes = []
-
-            # 添加违规信息节点
-            nodes.append(
-                Node(uin=int(user_id), name=user_name, content=[Plain(violation_info)])
-            )
-
-            # 添加违规图片节点（使用QQ图片URL，NapCat可直接下载）
-            nodes.append(
+            nodes = [
+                Node(uin=int(user_id), name=user_name, content=[Plain(violation_info)]),
+                # 添加违规图片节点（使用QQ图片URL，NapCat可直接下载）
                 Node(
                     uin=int(user_id), name=user_name, content=[Image.fromURL(image_url)]
-                )
+                ),
+            ]
+
+            await self._send_forward_nodes(event, manage_group_id, nodes)
+
+        except Exception as e:
+            logger.error(f"通知管理群失败: {e}")
+
+    def _build_action_str(
+        self, is_admin: bool, auto_recall: bool, auto_mute: bool, mute_duration: int
+    ) -> str:
+        """
+        格式化处理措施文案（单张/批量通报共用，v1.6.1 抽出）
+
+        Args:
+            is_admin: 是否为管理员/群主
+            auto_recall: 是否自动撤回
+            auto_mute: 是否自动禁言
+            mute_duration: 禁言时长（秒）
+        """
+        if is_admin:
+            return "无（管理员/群主身份，不执行处罚）"
+        recall_str = "撤回图片" if auto_recall else "未开启撤回"
+        if auto_mute and mute_duration > 0:
+            if mute_duration < 60:
+                mute_str = f"{mute_duration}秒"
+            elif mute_duration < 3600:
+                mute_str = f"{mute_duration // 60}分钟"
+            elif mute_duration < 86400:
+                mute_str = f"{mute_duration // 3600}小时"
+            else:
+                mute_str = f"{mute_duration // 86400}天"
+            mute_str = f"禁言{mute_str}"
+        elif auto_mute:
+            mute_str = "禁言0秒"
+        else:
+            mute_str = "未开启禁言"
+        return f"{recall_str}+{mute_str}"
+
+    async def _send_forward_nodes(
+        self, event: AstrMessageEvent, manage_group_id: str, nodes: list[Node]
+    ) -> None:
+        """
+        以合并转发消息发送节点列表到管理群（仅 aiocqhttp，v1.6.1 抽出）
+
+        Args:
+            event: 消息事件
+            manage_group_id: 管理群ID
+            nodes: 合并转发节点列表
+        """
+        try:
+            platform_name = event.get_platform_name()
+            if platform_name != "aiocqhttp":
+                return
+            from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
+                AiocqhttpMessageEvent,
             )
 
-            # 发送到管理群
-            platform_name = event.get_platform_name()
-            if platform_name == "aiocqhttp":
-                from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
-                    AiocqhttpMessageEvent,
+            if not isinstance(event, AiocqhttpMessageEvent):
+                return
+            client = event.bot
+
+            # 构建转发消息
+            forward_msgs = []
+            for node in nodes:
+                forward_msgs.append(
+                    {
+                        "type": "node",
+                        "data": {
+                            "name": node.name,
+                            "uin": str(node.uin),
+                            "content": MessageUtils.convert_message_chain(node.content),
+                        },
+                    }
                 )
 
-                if isinstance(event, AiocqhttpMessageEvent):
-                    client = event.bot
+            await client.api.call_action(
+                "send_group_forward_msg",
+                group_id=int(manage_group_id),
+                messages=forward_msgs,
+            )
+        except Exception as e:
+            logger.error(f"发送合并转发到管理群失败: {e}")
 
-                    # 构建转发消息
-                    forward_msgs = []
-                    for node in nodes:
-                        forward_msgs.append(
-                            {
-                                "type": "node",
-                                "data": {
-                                    "name": node.name,
-                                    "uin": str(node.uin),
-                                    "content": MessageUtils.convert_message_chain(
-                                        node.content
-                                    ),
-                                },
-                            }
-                        )
+    async def _notify_manage_group_batch(
+        self,
+        event: AstrMessageEvent,
+        group_id: str,
+        user_id: str,
+        user_name: str,
+        images: list[tuple[str, str, RiskLevel, str, str | None]],
+        mute_duration: int,
+        violation_count: int,
+        is_admin: bool = False,
+        auto_recall: bool = True,
+        auto_mute: bool = True,
+    ) -> None:
+        """
+        通知管理群（批量违规，v1.6.1）
 
-                    await client.api.call_action(
-                        "send_group_forward_msg",
-                        group_id=int(manage_group_id),
-                        messages=forward_msgs,
+        同一消息事件内多张违规图片合并为一条通报：
+        汇总信息节点 + 每张违规图片一个节点（图片 + 序号/风险等级/风险原因）。
+
+        Args:
+            event: 消息事件
+            group_id: 群ID
+            user_id: 用户ID
+            user_name: 用户名
+            images: 违规图片列表，每项 (md5_hash, image_url, risk_level, risk_reason, evidence_path)
+            mute_duration: 禁言时长（取最后一张图片的计算结果）
+            violation_count: 违规次数（取最后一张图片处理后的累计值）
+            is_admin: 是否为管理员/群主
+            auto_recall: 是否自动撤回
+            auto_mute: 是否自动禁言
+        """
+        try:
+            manage_group_id = self._config_manager.get_manage_group_id(group_id)
+            if not manage_group_id:
+                return
+
+            total = len(images)
+            action_str = self._build_action_str(
+                is_admin, auto_recall, auto_mute, mute_duration
+            )
+            evidence_count = sum(1 for img in images if img[4])
+            evidence_path_str = (
+                f"\n证据图片已保存: {evidence_count} 张" if evidence_count else ""
+            )
+            admin_tag = " [管理员/群主]" if is_admin else ""
+            summary = (
+                f"⚠️ 违规图片检测通知（共 {total} 张）\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"1️⃣ 昵称: {user_name}{admin_tag}\n"
+                f"2️⃣ QQ号: {user_id}\n"
+                f"3️⃣ 违规次数: 第{violation_count}次\n"
+                f"4️⃣ 本次违规时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"5️⃣ 处理措施: {action_str}\n"
+                f"━━━━━━━━━━━━━━━{evidence_path_str}"
+            )
+
+            # 构建合并转发消息：汇总节点 + 每张违规图片一个节点
+            nodes = [Node(uin=int(user_id), name=user_name, content=[Plain(summary)])]
+            for i, (_, image_url, risk_level, risk_reason, _) in enumerate(
+                images, start=1
+            ):
+                nodes.append(
+                    Node(
+                        uin=int(user_id),
+                        name=user_name,
+                        content=[
+                            Image.fromURL(image_url),
+                            Plain(
+                                f"\n[{i}/{total}] 风险等级: {risk_level.name}\n"
+                                f"风险原因: {risk_reason}"
+                            ),
+                        ],
                     )
+                )
+
+            await self._send_forward_nodes(event, manage_group_id, nodes)
 
         except Exception as e:
             logger.error(f"通知管理群失败: {e}")

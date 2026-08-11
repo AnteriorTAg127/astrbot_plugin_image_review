@@ -23,7 +23,7 @@ from .utils import ImageUtils, MessageUtils
     "image_review",
     "AnteriorTAg127",
     "图片审核插件，提供图片内容审核、违规处理、管理群通知等功能",
-    "1.6.0",
+    "1.6.1",
 )
 class ImageReviewPlugin(Star):
     """图片审核插件主类"""
@@ -267,6 +267,19 @@ class ImageReviewPlugin(Star):
                 else {}
             )
 
+            # v1.6.1：同一消息事件内的违规先收集，循环结束后统一批量通报，
+            # 修复合并转发消息内多张违规图片被逐张通报（管理群刷屏）的问题
+            pending_violations: list[dict] = []
+
+            # v1.6.1：管理员身份查询一次即可（同一事件内同群同用户结果不变），
+            # 供循环内审核日志标注使用，避免每张图片一次网络查询
+            try:
+                audit_is_admin = await self._admin_manager.is_user_admin(
+                    event, group_id, user_id
+                )
+            except Exception:
+                audit_is_admin = False
+
             # 顺序处理所有图片（避免并发过高）
             for image_url, image_md5 in images_to_check:
                 usages: list = []
@@ -296,12 +309,6 @@ class ImageReviewPlugin(Star):
                     # 一并记录管理员身份，使审核日志与违规记录的管理员标注口径一致
                     audit_id = None
                     try:
-                        audit_is_admin = await self._admin_manager.is_user_admin(
-                            event, group_id, user_id
-                        )
-                    except Exception:
-                        audit_is_admin = False
-                    try:
                         audit_id = await self._db.record_audit(
                             group_id,
                             user_id,
@@ -315,7 +322,7 @@ class ImageReviewPlugin(Star):
                     except Exception as e:
                         logger.error(f"记录审核日志异常: {e}")
 
-                    # 处理违规
+                    # 处理违规：先收集，循环结束后统一批量通报（v1.6.1）
                     if risk_level in (RiskLevel.Review, RiskLevel.Block):
                         # 计算感知哈希（仅违规时，供 WebUI 展示十六进制；失败不阻断）
                         phash: str | None = None
@@ -327,19 +334,16 @@ class ImageReviewPlugin(Star):
                                 )
                             except Exception as e:
                                 logger.debug(f"计算感知哈希失败: {e}")
-                        await self._violation_handler.handle_violation(
-                            event,
-                            group_id,
-                            user_id,
-                            user_name,
-                            md5_hash,
-                            image_url,
-                            risk_level,
-                            risk_reason,
-                            message_id,
-                            image_data,
-                            phash=phash,
-                            dhash=dhash,
+                        pending_violations.append(
+                            {
+                                "md5_hash": md5_hash,
+                                "image_url": image_url,
+                                "risk_level": risk_level,
+                                "risk_reason": risk_reason,
+                                "image_data": image_data,
+                                "phash": phash,
+                                "dhash": dhash,
+                            }
                         )
                 except CensorError as e:
                     logger.error(f"图片审核异常: {e}")
@@ -389,6 +393,18 @@ class ImageReviewPlugin(Star):
                         await self._db.set_audit_cost(audit_id, audit_total_cost)
                     except Exception as e:
                         logger.debug(f"回写审核成本失败: {e}")
+
+            # v1.6.1：统一处理本事件内收集到的所有违规
+            # （处罚/记录逐张执行，通报只发一条，修复合并转发多图多次通报）
+            if pending_violations:
+                await self._violation_handler.handle_violations_batch(
+                    event,
+                    group_id,
+                    user_id,
+                    user_name,
+                    message_id,
+                    pending_violations,
+                )
 
         except CensorError as e:
             logger.error(f"图片审核异常: {e}")

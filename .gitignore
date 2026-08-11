@@ -213,6 +213,9 @@ __marimo__/
 # Claude Code internal files
 .claude/
 
+# Reasonix 工作目录
+.reasonix/
+
 # CodeGraph 索引（本地构建缓存，不提交）
 .codegraph/
 
@@ -228,3 +231,5 @@ CLAUDE.md
 # 本地文档与开发笔记
 docs/
 开发/
+# AstrBot 运行时数据（非插件代码，不提交）
+data/
