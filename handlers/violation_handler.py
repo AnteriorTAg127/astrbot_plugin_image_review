@@ -577,6 +577,62 @@ class ViolationHandler:
         except Exception as e:
             logger.error(f"发送合并转发到管理群失败: {e}")
 
+    async def notify_manual_review(
+        self,
+        event: AstrMessageEvent,
+        group_id: str,
+        user_id: str,
+        user_name: str,
+        image_url: str,
+        reason: str,
+    ) -> None:
+        """
+        向管理群发送「需人工审核」通知（v1.6.3，卡片图片降级专用）
+
+        发送一条普通文本消息（非合并转发），仅提示管理员人工确认图片，
+        不含任何处罚措施（不撤回、不禁言）。仅支持 aiocqhttp；
+        manage_group_id 未配置、非 aiocqhttp 或发送失败时静默跳过，不抛出异常。
+
+        Args:
+            event: 消息事件
+            group_id: 被管理群ID
+            user_id: 发送者ID
+            user_name: 发送者昵称
+            image_url: 卡片图片原始 URL
+            reason: 降级原因说明
+        """
+        try:
+            manage_group_id = self._config_manager.get_manage_group_id(group_id)
+            if not manage_group_id:
+                return
+            platform_name = event.get_platform_name()
+            if platform_name != "aiocqhttp":
+                logger.debug("非 aiocqhttp 平台，跳过人工审核通知")
+                return
+            from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
+                AiocqhttpMessageEvent,
+            )
+
+            if not isinstance(event, AiocqhttpMessageEvent):
+                return
+            client = event.bot
+            text = (
+                "⚠️ 图片审核需人工确认\n"
+                "━━━━━━━━━━━━━━━\n"
+                f"昵称: {user_name}\n"
+                f"QQ号: {user_id}\n"
+                f"群号: {group_id}\n"
+                f"原因: {reason}\n"
+                f"图片URL: {image_url}"
+            )
+            await client.api.call_action(
+                "send_group_msg",
+                group_id=int(manage_group_id),
+                message=[{"type": "text", "data": {"text": text}}],
+            )
+        except Exception as e:
+            logger.error(f"发送人工审核通知失败: {e}")
+
     async def _notify_manage_group_batch(
         self,
         event: AstrMessageEvent,

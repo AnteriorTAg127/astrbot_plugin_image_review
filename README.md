@@ -3,7 +3,7 @@
 图片审核插件 / An image review plugin for AstrBot
 
 [!\[License\](https://img.shields.io/github/license/AnteriorTAg127/astrbot\_plugin\_image\_review null)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v1.6.1-blue null)](metadata.yaml)
+[![Version](https://img.shields.io/badge/version-v1.6.3-blue null)](metadata.yaml)
 
 > \[!IMPORTANT]
 > **本代码由 AI 生成，不保证代码质量，如有问题请多提 issues。**
@@ -19,6 +19,7 @@
 - **相似图片匹配** - 基于感知哈希（pHash/dHash）和汉明距离的相似图片检测，可识别经过简单处理的违规图片
 - **动图增强检测** - 对多帧图片(GIF/动图)进行增强检测，抽取多帧进行审核
 - **转发消息检测** - 支持检测合并转发消息中的图片内容，可配置抽检策略
+- **QQ 卡片消息检测** - 支持检测分享卡片/收藏卡片/QQ 空间卡片（share/json 段）内嵌图片，音乐/视频卡片自动过滤；低清缩略图自动抓取跳转页原图（og:image），失败降级为需人工审核（仅日志+管理群通知，不自动处罚）
 - **智能缓存机制** - 通过 MD5 缓存已审核图片，重复图片无需再次审核
 - **黑白名单系统** - 支持自动黑白名单和人工黑白名单，可灵活管理
 - **账号白名单** - QQ 账号维度白名单，支持全局与群级范围，白名单账号跳过审核
@@ -91,6 +92,9 @@ VLAI 使用 AstrBot 已配置的 LLM 提供商进行图片审核：
   "enable_forward_image_censor": true,
   "forward_image_sample_threshold": 10,
   "forward_image_sample_rate": 0.5,
+  "enable_card_image_censor": true,
+  "card_image_min_side": 200,
+  "enable_card_image_fetch_original": true,
   "disable_auto_whitelist": false,
   "disable_auto_blacklist": false,
   "enable_similarity_match": false,
@@ -153,6 +157,9 @@ VLAI 使用 AstrBot 已配置的 LLM 提供商进行图片审核：
 | `enable_forward_image_censor`     | bool   | 是否启用转发消息图片检测                | `false`  |
 | `forward_image_sample_threshold`  | int    | 转发消息图片抽检阈值，0表示全部检查          | `0`      |
 | `forward_image_sample_rate`       | number | 转发消息图片抽检率，0.0-1.0           | `0.5`    |
+| `enable_card_image_censor`        | bool   | 是否启用QQ卡片消息内嵌图片审核（分享卡片/收藏卡片/QQ空间卡片，share/json 段） | `false` |
+| `card_image_min_side`             | int    | 卡片内嵌图片最短边阈值(px)，低于此值视为低分辨率；PIL 不可用时自动跳过检查 | `200` |
+| `enable_card_image_fetch_original`| bool   | 低分辨率卡片图是否尝试从跳转页抓取原图(og:image)；关闭则直接降级为需人工 | `true` |
 | `enable_admin_permission_check`   | bool   | 是否开启管理命令权限验证                | `false`  |
 | `vlai.provider_id`                | string | 图片审核 LLM 提供商                | `""`     |
 | `vlai.backup_provider_id`         | string | 图片审核备用 LLM 提供商              | `""`     |
@@ -465,6 +472,40 @@ VLAI 使用 AstrBot 已配置的 LLM 提供商进行图片审核：
 
 - 转发消息中图片 ≤ 10 张：全部检查
 - 转发消息中图片 > 10 张：抽检 30% 的图片
+
+### QQ 卡片消息图片检测（v1.6.3）
+
+插件支持检测 QQ 内置卡片渠道（**分享卡片、收藏卡片、QQ 空间卡片**）内嵌的图片，独立开关控制（默认关闭）。
+
+**卡片识别**（基于 OneBot v11 段类型）：
+
+| 卡片类型 | OneBot 段 | 图片位置 |
+|---------|----------|---------|
+| 分享卡片（链接分享） | `share` | `image` 缩略图字段 |
+| 收藏卡片 / QQ 空间卡片 | `json` | 递归提取 JSON 内所有图片 URL |
+| 音乐卡片 / 视频卡片 | `music` / `video` 段，及 `json` 段 `app` 字段命中（qqmusic/qvideo/ovideo/video/music 等） | 自动跳过，不审核 |
+
+**质量处理流程**：
+
+1. 卡片内嵌图**最短边 ≥ `card_image_min_side`（默认 200px）** → 直接进入审核流水线（与普通图片一致，复用 MD5 黑白名单缓存、违规批量通报、成本记账）
+2. 分辨率不足 → 若开启 `enable_card_image_fetch_original`：从卡片跳转链接（share.url / json 的 jumpUrl）抓取网页 `og:image` 原图并验证分辨率 → 合格则以原图审核
+3. 抓取失败 / 开关关闭 / 原图仍不足 → **降级为需人工审核**：不撤回、不禁言、不累计违规次数，仅写入审核日志 + 向管理群发送一条「需人工确认」文本通知
+
+**说明**：
+
+- 无图卡片完全忽略（不记录日志、不参与统计）
+- 卡片图片数量较多时复用转发抽检配置（`forward_image_sample_threshold` / `forward_image_sample_rate`）
+- 审核日志新增「来源」维度（普通图片/转发/卡片），WebUI 审核日志 Tab 可按来源筛选
+
+#### 卡片检测配置示例
+
+```json
+{
+  "enable_card_image_censor": true,
+  "card_image_min_side": 200,
+  "enable_card_image_fetch_original": true
+}
+```
 
 ## 使用说明
 

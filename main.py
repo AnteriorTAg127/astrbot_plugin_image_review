@@ -4,8 +4,11 @@
 """
 
 import asyncio
+import json
 import os
 from typing import Any
+
+import aiohttp
 
 import astrbot.api.message_components as Comp
 from astrbot.api import logger
@@ -13,17 +16,23 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
 from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
-from .censors import CensorError, CensorFlow
+from .censors import CensorError, CensorFlow, download_image
 from .database import DatabaseManager, RiskLevel
 from .handlers import AdminManager, ConfigManager, ViolationHandler
 from .utils import ImageUtils, MessageUtils
+from .utils.card_utils import (
+    extract_json_card_images,
+    extract_jump_url,
+    extract_og_image,
+    is_music_video_card,
+)
 
 
 @register(
     "image_review",
     "AnteriorTAg127",
     "图片审核插件，提供图片内容审核、违规处理、管理群通知等功能",
-    "1.6.1",
+    "1.6.3",
 )
 class ImageReviewPlugin(Star):
     """图片审核插件主类"""
@@ -206,9 +215,19 @@ class ImageReviewPlugin(Star):
             # 获取群配置
             group_config = self._config_manager.get_group_config(group_id)
 
+            # 缓存配置（v1.6.3 起提前计算：卡片质量流程与审核流水线共用）
+            base_expire_hours = (
+                group_config.get("base_expire_hours", 2) if group_config else 2
+            )
+            max_expire_days = (
+                group_config.get("max_expire_days", 14) if group_config else 14
+            )
+
             # 检查是否是图片消息
             message_chain = event.get_messages()
             images_to_check = []
+            # v1.6.3：图片来源类型映射（image/forward/card），供审核日志 scene 列
+            scene_map: dict[str, str] = {}
 
             # 检查是否跳过QQ自带表情包
             skip_qq_emoji = self._config.get("skip_qq_builtin_emoji", True)
@@ -245,6 +264,80 @@ class ImageReviewPlugin(Star):
                                 forward_images, group_id
                             )
                             images_to_check.extend(sampled_images)
+                            # v1.6.3：转发图片审核日志标注 scene='forward'
+                            for forward_url, _ in sampled_images:
+                                scene_map[forward_url] = "forward"
+
+            # 卡片消息图片审核（v1.6.3：share/json 段内嵌图片，独立开关控制）
+            if self._config.get("enable_card_image_censor", False):
+                try:
+                    card_images = await self._collect_card_images(event)
+                except Exception as e:
+                    logger.debug(f"收集卡片消息图片异常: {e}")
+                    card_images = []
+                if card_images:
+                    # 复用转发抽检配置（阈值/比例，不新增配置项）
+                    sampled_cards = self._sample_images(card_images, group_id)
+                    # 降级（需人工审核）项存在时才懒查询管理员身份，避免无谓网络查询
+                    degrade_admin_loaded = False
+                    degrade_is_admin = False
+                    for card_item in sampled_cards:
+                        try:
+                            processed = await self._process_card_image(
+                                card_item,
+                                group_id,
+                                base_expire_hours,
+                                max_expire_days,
+                            )
+                        except Exception as e:
+                            logger.debug(f"卡片图片质量处理异常: {e}")
+                            continue
+                        if processed is None:
+                            continue  # 下载失败等整体问题，跳过该卡片图
+                        final_url, card_md5, degrade_reason = processed
+                        if degrade_reason:
+                            # 降级：仅审核日志 + 管理群人工审核通知，绝不进入违规链
+                            if not degrade_admin_loaded:
+                                degrade_admin_loaded = True
+                                try:
+                                    degrade_is_admin = (
+                                        await self._admin_manager.is_user_admin(
+                                            event, group_id, user_id
+                                        )
+                                    )
+                                except Exception:
+                                    degrade_is_admin = False
+                            try:
+                                await self._db.record_audit(
+                                    group_id,
+                                    user_id,
+                                    user_name,
+                                    md5_hash=None,
+                                    risk_level=RiskLevel.Review,
+                                    risk_reason="卡片图片分辨率过低，已标记需人工审核",
+                                    source=self._config.get(
+                                        "image_censor_provider", "Aliyun"
+                                    ),
+                                    scene="card",
+                                    is_admin=degrade_is_admin,
+                                )
+                            except Exception as e:
+                                logger.error(f"记录卡片图片降级审核日志异常: {e}")
+                            try:
+                                await self._violation_handler.notify_manual_review(
+                                    event,
+                                    group_id,
+                                    user_id,
+                                    user_name,
+                                    card_item["url"],
+                                    "卡片图片分辨率过低，无法自动审核",
+                                )
+                            except Exception as e:
+                                logger.error(f"发送卡片图片人工审核通知异常: {e}")
+                            continue
+                        # 合格：与普通图片一致进入审核流水线（md5 预计算跳过首次下载）
+                        images_to_check.append((final_url, card_md5))
+                        scene_map[final_url] = "card"
 
             # 检查是否是图片消息且启用了图片审核
             if not images_to_check:
@@ -253,12 +346,6 @@ class ImageReviewPlugin(Star):
                 return
             if not self._censor_flow.is_image_censor_enabled():
                 return
-            base_expire_hours = (
-                group_config.get("base_expire_hours", 2) if group_config else 2
-            )
-            max_expire_days = (
-                group_config.get("max_expire_days", 14) if group_config else 14
-            )
 
             # 预加载全部模型定价表（v1.5.4 成本记账用，一次 DB 查所有避免循环内 N 次查询）
             pricing_map = (
@@ -317,6 +404,7 @@ class ImageReviewPlugin(Star):
                             risk_level,
                             risk_reason,
                             source=self._config.get("image_censor_provider", "Aliyun"),
+                            scene=scene_map.get(image_url, "image"),
                             is_admin=audit_is_admin,
                         )
                     except Exception as e:
@@ -526,16 +614,225 @@ class ImageReviewPlugin(Star):
             logger.debug(f"提取转发消息图片异常: {e}")
         return images
 
-    def _sample_images(
-        self,
-        images: list[tuple[str, str | None]],
-        group_id: str,
-    ) -> list[tuple[str, str | None]]:
+    async def _collect_card_images(self, event: AstrMessageEvent) -> list[dict]:
         """
-        对转发消息中的图片进行抽检
+        收集卡片消息内嵌图片（v1.6.3，share/json 段）
+
+        返回 list[dict]，每项 {"url": 图片URL, "jump_url": 跳转链接|None}：
+        - Comp.Share: image 非空 → (comp.image, comp.url)
+        - Comp.Json: data 为 dict，先 is_music_video_card 过滤（音乐/视频卡片跳过），
+          再 extract_json_card_images 递归提取图片、extract_jump_url 取跳转链接
+        - Comp.Music / Comp.Video：跳过
+        - 消息链中无 Comp.Json 但 raw_message 有 json 段（OneBot json 段含 HTML
+          实体如 &#44; 时 adapter 构造 Json 组件失败、组件被忽略）→ 从 raw_message 回退
+        - 无图卡片返回空列表（不记录、不统计）
 
         Args:
-            images: 所有图片列表
+            event: 消息事件
+
+        Returns:
+            卡片图片列表（已按 URL 去重）；异常时返回空列表
+        """
+        cards: list[dict] = []
+        try:
+            chain = event.get_messages()
+            has_json_comp = False
+            for comp in chain:
+                if isinstance(comp, Comp.Share):
+                    image = getattr(comp, "image", "") or ""
+                    if image.startswith(("http://", "https://")):
+                        cards.append(
+                            {
+                                "url": image,
+                                "jump_url": getattr(comp, "url", "") or None,
+                            }
+                        )
+                elif isinstance(comp, Comp.Json):
+                    has_json_comp = True
+                    data = getattr(comp, "data", None)
+                    if not isinstance(data, dict):
+                        continue
+                    if is_music_video_card(data):
+                        continue
+                    jump_url = extract_jump_url(data)
+                    for url in extract_json_card_images(data):
+                        cards.append({"url": url, "jump_url": jump_url})
+                # Comp.Music / Comp.Video 及其他组件：跳过
+
+            # 解析失败回退：消息链无 Json 组件时从 raw_message 提取 json 段
+            if not has_json_comp:
+                cards.extend(self._extract_json_cards_from_raw_message(event))
+
+            # 去重（share 与 json 段可能携带相同 URL）
+            deduped: list[dict] = []
+            seen_urls: set[str] = set()
+            for item in cards:
+                if item["url"] in seen_urls:
+                    continue
+                seen_urls.add(item["url"])
+                deduped.append(item)
+            return deduped
+        except Exception as e:
+            logger.debug(f"收集卡片消息图片异常: {e}")
+            return []
+
+    def _extract_json_cards_from_raw_message(
+        self, event: AstrMessageEvent
+    ) -> list[dict]:
+        """
+        从 raw_message 提取 json 段并解析为卡片图片（v1.6.3 解析失败回退）
+
+        OneBot json 段在 adapter 构造 Comp.Json 时 json.loads 失败（如 JSON
+        字符串含 &#44; 等 HTML 实体）后组件会被忽略，消息链中没有 Json 组件，
+        此时只能从 raw_message 段列表读取原始 JSON 字符串，反转义后解析
+        （参照 astrbot/core/utils/quoted_message/chain_parser.py 先例）。
+
+        Args:
+            event: 消息事件
+
+        Returns:
+            卡片图片列表（每项 {"url", "jump_url"}）；raw_message 不可用或
+            解析失败时返回空列表
+        """
+        cards: list[dict] = []
+        try:
+            raw = getattr(event.message_obj, "raw_message", None)
+            segments = raw.get("message") if isinstance(raw, dict) else None
+            if not isinstance(segments, list):
+                return cards
+            for seg in segments:
+                if not (isinstance(seg, dict) and seg.get("type") == "json"):
+                    continue
+                seg_data = seg.get("data", {}) or {}
+                raw_json = seg_data.get("data", "")
+                if not isinstance(raw_json, str) or not raw_json.strip():
+                    continue
+                try:
+                    raw_json = raw_json.replace("&#44;", ",")
+                    parsed = json.loads(raw_json)
+                except Exception as e:
+                    logger.debug(f"json 卡片段解析失败，跳过: {e}")
+                    continue
+                if not isinstance(parsed, dict):
+                    continue
+                if is_music_video_card(parsed):
+                    continue
+                jump_url = extract_jump_url(parsed)
+                for url in extract_json_card_images(parsed):
+                    cards.append({"url": url, "jump_url": jump_url})
+        except Exception as e:
+            logger.debug(f"从 raw_message 提取 json 卡片异常: {e}")
+        return cards
+
+    async def _process_card_image(
+        self,
+        card_item: dict,
+        group_id: str,
+        base_expire_hours: int,
+        max_expire_days: int,
+    ) -> tuple[str, str | None, str | None] | None:
+        """
+        卡片图片质量处理（v1.6.3，进入审核流水线前）
+
+        1. 下载图片 → ImageUtils.get_image_size 读取尺寸（PIL 不可用/解析失败视为合格）
+        2. 最短边 ≥ card_image_min_side → 直接使用原 URL（md5 一并计算返回）
+        3. 尺寸不足且开启 enable_card_image_fetch_original → 从卡片跳转页抓取
+           og:image 原图并验证分辨率，合格则用原图 URL（md5 重算）
+        4. 其余情况（抓取失败/开关关闭）→ 降级为需人工审核
+
+        Args:
+            card_item: 卡片图片项，含 url 与 jump_url
+            group_id: 群ID（保留参数）
+            base_expire_hours: 基础缓存过期小时（保留参数）
+            max_expire_days: 最大缓存天数（保留参数）
+
+        Returns:
+            合格: (最终图片URL, md5, None)；md5 供 submit_image 的 precalculated_md5
+            降级: ("", None, 降级原因)，调用方只记录日志并通知人工审核
+            None: 下载失败等整体问题，跳过该卡片图
+        """
+        image_url = str(card_item.get("url", "") or "")
+        if not image_url:
+            return None
+        try:
+            image_data = await download_image(image_url)
+        except CensorError as e:
+            logger.debug(f"卡片图片下载失败，跳过审核: {image_url} - {e}")
+            return None
+        except Exception as e:
+            logger.debug(f"卡片图片下载异常，跳过审核: {image_url} - {e}")
+            return None
+
+        min_side = int(self._config.get("card_image_min_side", 200) or 200)
+        size = ImageUtils.get_image_size(image_data)
+        if size is None:
+            # PIL 不可用或解析失败：跳过分辨率检查，视为合格
+            return (image_url, DatabaseManager.calculate_md5(image_data), None)
+
+        if min(size) >= min_side:
+            return (image_url, DatabaseManager.calculate_md5(image_data), None)
+
+        # 分辨率不足
+        if not self._config.get("enable_card_image_fetch_original", True):
+            return ("", None, "resolution_too_low_fetch_disabled")
+
+        # 尝试从卡片跳转页抓取 og:image 原图并验证
+        og_image_url = await self._fetch_card_original_image(card_item)
+        if og_image_url:
+            try:
+                og_data = await download_image(og_image_url)
+            except CensorError as e:
+                logger.debug(f"卡片原图下载失败: {og_image_url} - {e}")
+                og_data = None
+            except Exception as e:
+                logger.debug(f"卡片原图下载异常: {og_image_url} - {e}")
+                og_data = None
+            if og_data is not None:
+                og_size = ImageUtils.get_image_size(og_data)
+                if og_size is not None and min(og_size) >= min_side:
+                    return (og_image_url, DatabaseManager.calculate_md5(og_data), None)
+
+        logger.debug(f"卡片图片分辨率不足且无法获取合格原图，降级: {image_url}")
+        return ("", None, "resolution_too_low")
+
+    async def _fetch_card_original_image(self, card_item: dict) -> str | None:
+        """
+        从卡片跳转页 HTML 抓取 og:image 原图 URL（v1.6.3）
+
+        使用 aiohttp（5 秒超时），仅处理 http(s) 跳转链接；任何异常或缺失都
+        返回 None，由调用方降级处理，不影响消息主流程。
+
+        Args:
+            card_item: 卡片图片项（含 jump_url）
+
+        Returns:
+            og:image URL；跳转链接缺失/请求失败/无 og:image 时返回 None
+        """
+        jump_url = str(card_item.get("jump_url", "") or "")
+        if not jump_url.startswith(("http://", "https://")):
+            return None
+        try:
+            timeout = aiohttp.ClientTimeout(total=5)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(jump_url, timeout=timeout) as resp:
+                    if resp.status != 200:
+                        return None
+                    html = await resp.text()
+            return extract_og_image(html)
+        except Exception as e:
+            logger.debug(f"抓取卡片跳转页 og:image 失败: {jump_url} - {e}")
+            return None
+
+    def _sample_images(
+        self,
+        images: list[Any],
+        group_id: str,
+    ) -> list[Any]:
+        """
+        对转发消息/卡片消息中的图片进行抽检（不检查元素内部结构）
+
+        Args:
+            images: 所有图片列表（转发消息为 (url, md5) 元组，卡片为 {"url","jump_url"} dict）
             group_id: 群ID
 
         Returns:
@@ -550,9 +847,7 @@ class ImageReviewPlugin(Star):
 
         # 如果图片数量小于阈值，全量检测
         if len(images) <= sample_threshold:
-            logger.debug(
-                f"转发消息图片数 {len(images)} <= 阈值 {sample_threshold}，全量检测"
-            )
+            logger.debug(f"图片数 {len(images)} <= 阈值 {sample_threshold}，全量检测")
             return images
 
         # 超过阈值，按比例抽检
@@ -561,7 +856,7 @@ class ImageReviewPlugin(Star):
         sample_count = max(1, int(len(images) * sample_rate))
         sampled = random.sample(images, min(sample_count, len(images)))
         logger.info(
-            f"群 {group_id} 转发消息抽检: 共 {len(images)} 张图片，抽检 {len(sampled)} 张"
+            f"群 {group_id} 图片抽检: 共 {len(images)} 张图片，抽检 {len(sampled)} 张"
         )
         return sampled
 

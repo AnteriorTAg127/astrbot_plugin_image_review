@@ -48,6 +48,24 @@
         "hint": "抽检时的抽样比例，0.0-1.0之间，例如0.5表示抽检50%的图片",
         "default": 0.5
     },
+    "enable_card_image_censor": {
+        "type": "bool",
+        "description": "是否启用QQ卡片消息图片审核",
+        "hint": "开启后审核分享卡片/收藏卡片/QQ空间卡片内嵌图片（share/json 段），音乐/视频卡片自动跳过",
+        "default": false
+    },
+    "card_image_min_side": {
+        "type": "int",
+        "description": "卡片内嵌图片最短边阈值(px)",
+        "hint": "低于此值视为低分辨率，将尝试抓取跳转页原图或降级需人工；PIL 不可用时自动跳过检查",
+        "default": 200
+    },
+    "enable_card_image_fetch_original": {
+        "type": "bool",
+        "description": "低分辨率卡片图尝试抓原图",
+        "hint": "分辨率不足时从卡片跳转页提取 og:image 原图；关闭则直接降级为需人工",
+        "default": true
+    },
     "disable_auto_whitelist": {
         "type": "bool",
         "description": "关闭自动白名单",

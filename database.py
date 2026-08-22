@@ -256,6 +256,7 @@ class DatabaseManager:
                     risk_level INTEGER,
                     risk_reason TEXT,
                     source TEXT,
+                    scene TEXT DEFAULT 'image',
                     created_at TEXT,
                     cost REAL DEFAULT 0,
                     is_admin INTEGER NOT NULL DEFAULT 0
@@ -439,7 +440,7 @@ class DatabaseManager:
     async def _migrate_audit_log_columns(self):
         """audit_log 列迁移（独立连接，PRAGMA 检测后 ALTER，幂等）。
 
-        涵盖 cost(v1.5.4) 与 is_admin(v1.6.x) 两列；老库缺哪列补哪列。
+        涵盖 cost(v1.5.4)、is_admin(v1.6.x) 与 scene(v1.6.3) 三列；老库缺哪列补哪列。
         """
         import logging
 
@@ -460,6 +461,11 @@ class DatabaseManager:
                         "ALTER TABLE audit_log ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0"
                     )
                     added.append("is_admin")
+                if "scene" not in cols:
+                    await cursor.execute(
+                        "ALTER TABLE audit_log ADD COLUMN scene TEXT DEFAULT 'image'"
+                    )
+                    added.append("scene")
                 if added:
                     await conn.commit()
                     logger.info(f"audit_log 迁移: 成功新增列 {added}")
@@ -1615,6 +1621,7 @@ class DatabaseManager:
         risk_level: RiskLevel,
         risk_reason: str,
         source: str = "",
+        scene: str = "image",
         is_admin: bool = False,
     ) -> int | None:
         """
@@ -1628,6 +1635,7 @@ class DatabaseManager:
             risk_level: 风险等级
             risk_reason: 风险原因（LLM 分析结论）
             source: 审核来源（如 Aliyun / VLAI / cache）
+            scene: 审核来源类型（image / forward / card，v1.6.3），默认 image
             is_admin: 发送者是否为管理员/群主（供 WebUI 标注，与违规记录口径一致）
 
         Returns:
@@ -1643,8 +1651,8 @@ class DatabaseManager:
                 cursor = await conn.cursor()
                 await cursor.execute(
                     """INSERT INTO audit_log
-                       (group_id, user_id, user_name, md5_hash, risk_level, risk_reason, source, created_at, is_admin)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       (group_id, user_id, user_name, md5_hash, risk_level, risk_reason, source, scene, created_at, is_admin)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         group_id,
                         user_id,
@@ -1653,6 +1661,7 @@ class DatabaseManager:
                         risk_level.value,
                         risk_reason,
                         source,
+                        scene,
                         _utc_iso(),
                         1 if is_admin else 0,
                     ),
@@ -1983,12 +1992,13 @@ class DatabaseManager:
         group_id: str | None = None,
         risk_level: int | None = None,
         keyword: str | None = None,
+        scene: str | None = None,
         sort_by: str | None = None,
         sort_dir: str | None = None,
         date_from: str | None = None,
         date_to: str | None = None,
     ) -> tuple[list[dict], int]:
-        """分页查询审核日志"""
+        """分页查询审核日志（v1.6.3 起支持按 scene 过滤，None/空串=全部）"""
         import logging
 
         logger = logging.getLogger(__name__)
@@ -2012,6 +2022,9 @@ class DatabaseManager:
             )
             like = f"%{escaped}%"
             params.extend([like, like])
+        if scene:
+            clauses.append("scene = ?")
+            params.append(scene)
         if date_from:
             clauses.append("date(created_at, '+8 hours') >= date(?)")
             params.append(date_from)
@@ -2844,9 +2857,7 @@ class DatabaseManager:
         audit = self._clamp_retention(
             await self.get_setting("audit_log_retention_days")
         )
-        cost = self._clamp_retention(
-            await self.get_setting("cost_log_retention_days")
-        )
+        cost = self._clamp_retention(await self.get_setting("cost_log_retention_days"))
         return {
             "audit_log_retention_days": audit,
             "cost_log_retention_days": cost,

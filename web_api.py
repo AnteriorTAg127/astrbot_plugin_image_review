@@ -645,8 +645,9 @@ class WebApiHandler:
     # ------------------------------------------------------------------ #
 
     async def api_audits_list(self) -> Any:
-        """GET /audits?page=&page_size=&group_id=&risk_level=&keyword=
-        &sort_by=&sort_dir=&date_from=&date_to=（risk_level=-1 表示全部）"""
+        """GET /audits?page=&page_size=&group_id=&risk_level=&keyword=&scene=
+        &sort_by=&sort_dir=&date_from=&date_to=（risk_level=-1 表示全部；
+        scene 空/缺省=全部，可选值 image/forward/card）"""
         try:
             page, page_size = _parse_paging()
             risk_level = _parse_risk_level(request.query.get("risk_level"))
@@ -658,6 +659,7 @@ class WebApiHandler:
                 group_id=request.query.get("group_id") or None,
                 risk_level=risk_level,
                 keyword=request.query.get("keyword") or None,
+                scene=request.query.get("scene") or None,
                 sort_by=request.query.get("sort_by") or None,
                 sort_dir=request.query.get("sort_dir") or None,
                 date_from=request.query.get("date_from") or None,

@@ -309,7 +309,7 @@ tbody tr:last-child td { border-bottom: none; }
   var state = {
     tab: "overview",
     violations: { page: 1, page_size: 20, group_id: "", user_id: "", keyword: "", risk_level: "", items: [], total: 0, selected: {}, date_from: "", date_to: "", sort_by: "", sort_dir: "" },
-    audits: { page: 1, page_size: 20, group_id: "", risk_level: "", keyword: "", items: [], total: 0, selected: {}, date_from: "", date_to: "", sort_by: "", sort_dir: "" },
+    audits: { page: 1, page_size: 20, group_id: "", risk_level: "", scene: "", keyword: "", items: [], total: 0, selected: {}, date_from: "", date_to: "", sort_by: "", sort_dir: "" },
     whitelist: { items: [], total: 0, group_id_filter: "", sort_by: "", sort_dir: "" },
     blacklist: { items: [], total: 0, group_id_filter: "", sort_by: "", sort_dir: "" },
     account_wl: { items: [], total: 0, group_id_filter: "", sort_by: "", sort_dir: "" },
@@ -574,6 +574,22 @@ tbody tr:last-child td { border-bottom: none; }
       sel.appendChild(o);
     });
     return sel;
+  }
+  // 来源（scene）下拉；值与后端 scene 参数一致：""=全部（缺省同），image/forward/card
+  function makeSceneSelect(currentVal) {
+    var sel = el("select", { name: "scene" });
+    [["", "全部"], ["image", "普通图片"], ["forward", "转发"], ["card", "卡片"]].forEach(function(opt){
+      var o = el("option", { value: opt[0], text: opt[1] });
+      if ((currentVal || "") === opt[0]) o.selected = true;
+      sel.appendChild(o);
+    });
+    return sel;
+  }
+  // scene 值 → 中文名（表格/详情「来源类型」展示；其余值归为普通图片）
+  function sceneLabel(v) {
+    if (v === "card") return "卡片";
+    if (v === "forward") return "转发";
+    return "图片";
   }
   // risk_level → badge 样式 + 中文名
   function riskBadgeInfo(level) {
@@ -1392,6 +1408,8 @@ tbody tr:last-child td { border-bottom: none; }
     filter.appendChild(selGid);
     var selRisk = makeRiskSelect(s.risk_level, ["通过", "复审", "违规"]);
     filter.appendChild(selRisk);
+    var selScene = makeSceneSelect(s.scene);
+    filter.appendChild(selScene);
     var inKw = makeInput("keyword", s.keyword, "关键字");
     filter.appendChild(inKw);
     var inDf = makeDateInput("date_from", s.date_from);
@@ -1403,6 +1421,7 @@ tbody tr:last-child td { border-bottom: none; }
     filter.appendChild(makeButton("搜索", "btn-primary", function(){
       s.group_id = selGid.value;
       s.risk_level = selRisk.value;
+      s.scene = selScene.value;
       s.keyword = inKw.value.trim();
       s.date_from = inDf.value;
       s.date_to = inDt.value;
@@ -1438,6 +1457,7 @@ tbody tr:last-child td { border-bottom: none; }
         page: s.page, page_size: s.page_size,
         group_id: s.group_id,
         risk_level: s.risk_level === "" ? undefined : s.risk_level,
+        scene: s.scene === "" ? undefined : s.scene,
         keyword: s.keyword,
         date_from: s.date_from || undefined, date_to: s.date_to || undefined,
         sort_by: s.sort_by || undefined, sort_dir: s.sort_dir || undefined
@@ -1508,7 +1528,10 @@ tbody tr:last-child td { border-bottom: none; }
           tdReason.setAttribute("data-label", "分析");
           tdReason.setAttribute("title", row.risk_reason || "");
           tr.appendChild(tdReason);
-          var tdS = el("td", { text: row.source || "-" }); tdS.setAttribute("data-label", "来源"); tr.appendChild(tdS);
+          // 来源列改按 scene（来源类型：图片/转发/卡片）展示；提供商 source 保留在详情弹窗
+          var tdS = el("td"); tdS.setAttribute("data-label", "来源");
+          tdS.appendChild(el("span", { class: "badge badge-info", text: sceneLabel(row.scene) }));
+          tr.appendChild(tdS);
           // 成本列（v1.5.4）
           var tdC = el("td", { text: (row.cost && row.cost > 0) ? row.cost.toFixed(6) : "-" });
           tdC.setAttribute("data-label", "成本"); tr.appendChild(tdC);
@@ -1559,6 +1582,7 @@ tbody tr:last-child td { border-bottom: none; }
     box.appendChild(detailRow("风险等级", rInfo.text + " (" + (row.risk_level == null ? "" : row.risk_level) + ")"));
     box.appendChild(detailRow("LLM 分析", row.risk_reason || ""));
     box.appendChild(detailRow("来源", row.source || ""));
+    box.appendChild(detailRow("来源类型", sceneLabel(row.scene)));
     showModal({
       title: "审核详情 #" + row.id,
       content: box,

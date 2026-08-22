@@ -160,6 +160,29 @@ class ImageUtils:
         return ImageUtils.extract_md5_from_filename(image_comp.file)
 
     @staticmethod
+    def get_image_size(image_data: bytes) -> tuple[int, int] | None:
+        """
+        读取图片像素尺寸 (width, height)
+
+        仅解析图片头部获取尺寸，不解码全图；PIL 不可用或解析失败时返回 None，不抛异常。
+
+        Args:
+            image_data: 图片字节数据
+
+        Returns:
+            (width, height) 元组；PIL 不可用或解析失败返回 None
+        """
+        if not HAS_PIL:
+            return None
+
+        try:
+            with Image.open(BytesIO(image_data)) as img:
+                return img.size
+        except Exception as e:
+            logger.debug(f"读取图片尺寸时发生异常: {e}")
+            return None
+
+    @staticmethod
     def _dct_1d(vector: list[float]) -> list[float]:
         """一维离散余弦变换（Type-II DCT）"""
         n = len(vector)
